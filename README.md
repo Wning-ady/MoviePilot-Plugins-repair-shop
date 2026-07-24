@@ -1,12 +1,12 @@
 # MoviePilot Plugins Repair Shop
 
-用于发布经过针对性修复和回归测试的 MoviePilot V2 插件。
+用于发布经过针对性修复和回归测试的 MoviePilot V2 专用插件。仓库采用官方的 `package.v2.json` 与 `plugins.v2/` 结构。
 
 ## 清理媒体文件（修复版）
 
 插件 ID：`RemoveLinkFix`，当前版本：`2.17`。
 
-本插件基于 DzAvril 的 `RemoveLink 2.16`，主要修复：
+本插件基于 [DzAvril/MoviePilot-Plugins](https://github.com/DzAvril/MoviePilot-Plugins) 的 `RemoveLink 2.16`，并非基于 `jxxghp/MoviePilot-Plugins` 当前的 `RemoveLink 2.3.1`。主要修复：
 
 - 下载器删除时使用临时源目录，导致转移记录按 `src` 无法命中的问题。
 - 删除媒体库硬链接时未按转移记录 `dest` 回退查找的问题。
@@ -25,6 +25,17 @@
 4. 在修复版中重新配置监控目录、排除目录和删除选项，再启用插件。
 
 修复版使用独立插件 ID 和配置前缀，不会覆盖原版配置。完成一次小范围验证后再扩大监控范围。
+
+## 仓库结构
+
+```text
+MoviePilot-Plugins-repair-shop/
+├── icons/Ombi_A.png
+├── plugins.v2/removelinkfix/__init__.py
+└── package.v2.json
+```
+
+插件目录名、类名、索引 ID、版本、名称、描述、图标、作者和权限级别均由自动化测试检查一致性。
 
 ## 验证重点
 

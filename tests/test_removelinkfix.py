@@ -1,12 +1,14 @@
 import importlib.util
 import ast
 import json
+import struct
 import sys
 import tempfile
 import types
 import unittest
 from datetime import datetime
 from pathlib import Path
+from urllib.parse import urlparse
 
 
 class _Logger:
@@ -220,7 +222,18 @@ class RemoveLinkFixTests(unittest.TestCase):
         self.assertEqual(metadata["icon"], class_values["plugin_icon"])
         self.assertEqual(metadata["author"], class_values["plugin_author"])
         self.assertEqual(metadata["level"], class_values["auth_level"])
-        self.assertTrue((ROOT / "icons" / metadata["icon"]).is_file())
+        icon_url = metadata["icon"]
+        self.assertEqual(
+            icon_url,
+            "https://raw.githubusercontent.com/Wning-ady/"
+            "MoviePilot-Plugins-repair-shop/main/icons/Ombi_A.png",
+        )
+        icon_path = ROOT / "icons" / Path(urlparse(icon_url).path).name
+        icon_data = icon_path.read_bytes()
+        self.assertEqual(icon_data[:8], b"\x89PNG\r\n\x1a\n")
+        width, height = struct.unpack(">II", icon_data[16:24])
+        self.assertGreater(width, 0)
+        self.assertGreater(height, 0)
 
 
 if __name__ == "__main__":

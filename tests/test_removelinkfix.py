@@ -1,4 +1,6 @@
 import importlib.util
+import ast
+import json
 import sys
 import tempfile
 import types
@@ -35,7 +37,8 @@ _module("app.core.event", eventmanager=types.SimpleNamespace(send_event=lambda *
 _module("app.chain.storage", StorageChain=object)
 sys.modules["app"].schemas = sys.modules["app.schemas"]
 
-PLUGIN_PATH = Path(__file__).parents[1] / "plugins" / "removelinkfix" / "__init__.py"
+ROOT = Path(__file__).parents[1]
+PLUGIN_PATH = ROOT / "plugins.v2" / "removelinkfix" / "__init__.py"
 SPEC = importlib.util.spec_from_file_location("removelinkfix", PLUGIN_PATH)
 PLUGIN = importlib.util.module_from_spec(SPEC)
 sys.modules[SPEC.name] = PLUGIN
@@ -120,6 +123,38 @@ class RemoveLinkFixTests(unittest.TestCase):
 
             self.assertTrue(season.exists())
             self.assertTrue(target.exists())
+
+    def test_v2_repository_structure_and_metadata_are_synced(self):
+        package = json.loads((ROOT / "package.v2.json").read_text(encoding="utf-8"))
+        metadata = package["RemoveLinkFix"]
+        tree = ast.parse(PLUGIN_PATH.read_text(encoding="utf-8"))
+        plugin_class = next(
+            node
+            for node in tree.body
+            if isinstance(node, ast.ClassDef) and node.name == "RemoveLinkFix"
+        )
+        class_values = {}
+        for node in plugin_class.body:
+            if (
+                isinstance(node, ast.Assign)
+                and len(node.targets) == 1
+                and isinstance(node.targets[0], ast.Name)
+            ):
+                try:
+                    class_values[node.targets[0].id] = ast.literal_eval(node.value)
+                except (ValueError, TypeError):
+                    continue
+
+        self.assertEqual(PLUGIN_PATH.parent.name, plugin_class.name.lower())
+        self.assertFalse((ROOT / "package.json").exists())
+        self.assertFalse((ROOT / "plugins").exists())
+        self.assertEqual(metadata["name"], class_values["plugin_name"])
+        self.assertEqual(metadata["description"], class_values["plugin_desc"])
+        self.assertEqual(metadata["version"], class_values["plugin_version"])
+        self.assertEqual(metadata["icon"], class_values["plugin_icon"])
+        self.assertEqual(metadata["author"], class_values["plugin_author"])
+        self.assertEqual(metadata["level"], class_values["auth_level"])
+        self.assertTrue((ROOT / "icons" / metadata["icon"]).is_file())
 
 
 if __name__ == "__main__":

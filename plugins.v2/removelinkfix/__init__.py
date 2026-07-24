@@ -287,9 +287,9 @@ class RemoveLinkFix(_PluginBase):
     # 插件名称
     plugin_name = "清理媒体文件（修复版）"
     # 插件描述
-    plugin_desc = "媒体文件清理工具：支持硬链接文件清理、STRM文件清理、刮削文件清理（元数据、图片、字幕）、转移记录清理、种子联动删除等功能"
+    plugin_desc = "基于 DzAvril 清理媒体文件 2.16 的修复版，修复临时源路径、转移记录误报、Emby 缩略图残留及目录清理边界问题。"
     # 插件图标
-    plugin_icon = "https://raw.githubusercontent.com/jxxghp/MoviePilot-Plugins/main/icons/Ombi_A.png"
+    plugin_icon = "Ombi_A.png"
     # 插件版本
     plugin_version = "2.17"
     # 插件作者

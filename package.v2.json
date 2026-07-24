@@ -1,13 +1,12 @@
 {
   "RemoveLinkFix": {
     "name": "清理媒体文件（修复版）",
-    "description": "基于清理媒体文件 2.16 的修复版：修复临时源路径导致转移记录未清理、Emby 无扩展名缩略图残留及目录清理边界问题",
+    "description": "基于 DzAvril 清理媒体文件 2.16 的修复版，修复临时源路径、转移记录误报、Emby 缩略图残留及目录清理边界问题。",
     "labels": "文件整理",
     "version": "2.17",
-    "icon": "https://raw.githubusercontent.com/jxxghp/MoviePilot-Plugins/main/icons/Ombi_A.png",
+    "icon": "Ombi_A.png",
     "author": "DzAvril / Wning-ady",
     "level": 1,
-    "v2": true,
     "history": {
       "v2.17": "修复临时源路径下转移记录误报、episode-thumb-N 残留、监控根越界、符号链接与媒体扩展误删风险；通知显示真实转移记录结果",
       "v2.16": "上游版本：修复较早创建的媒体硬链接被误判为重新整理的问题"

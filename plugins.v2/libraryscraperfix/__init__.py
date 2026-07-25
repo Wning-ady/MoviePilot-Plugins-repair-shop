@@ -124,7 +124,7 @@ class LibraryScraperFix(_PluginBase):
         "https://raw.githubusercontent.com/Wning-ady/"
         "MoviePilot-Plugins-repair-shop/main/icons/Ombi_A.png"
     )
-    plugin_version = "1.0.1"
+    plugin_version = "1.0.2"
     plugin_author = "jxxghp,Wning-ady"
     author_url = "https://github.com/Wning-ady/MoviePilot-Plugins-repair-shop"
     plugin_config_prefix = "libraryscraperfix_"
@@ -689,8 +689,8 @@ class LibraryScraperFix(_PluginBase):
             target.mtype,
             target.target_type,
             target.tmdbid,
-            target.source_root,
             cancel_event,
+            target.source_root,
         ):
             return ScrapeOutcome(status="success", scraped_files=target.file_count)
 
@@ -729,8 +729,8 @@ class LibraryScraperFix(_PluginBase):
                     child_mtype,
                     self._target_file,
                     self._valid_tmdbid(getattr(child_meta, "tmdbid", None)),
-                    target.source_root,
                     cancel_event,
+                    target.source_root,
                 )
                 if recognized:
                     outcome.scraped_files += 1

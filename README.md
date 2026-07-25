@@ -2,6 +2,31 @@
 
 用于发布经过针对性修复和回归测试的 MoviePilot V2 专用插件。仓库采用官方的 `package.v2.json` 与 `plugins.v2/` 结构。
 
+## 媒体库刮削（修复版）
+
+插件 ID：`LibraryScraperFix`，当前版本：`1.0.0`。
+
+本插件基于官方 [LibraryScraper 2.1.3](https://github.com/jxxghp/MoviePilot-Plugins/tree/main/plugins.v2/libraryscraper)，使用独立插件 ID，不覆盖官方插件。主要改进：
+
+- “仅补齐缺失元数据”独立于 MoviePilot 全局覆盖策略，同时保留全局禁用项。
+- 主扫描与目录识别失败后的回退扫描使用相同的排除路径和强制媒体类型规则。
+- 损坏、空白或缺少 ID 的 NFO 不再覆盖文件名中已解析出的有效 TMDB ID。
+- 只扫描真实媒体文件；符号链接、未知媒体类型和越界路径不会进入刮削链。
+- 使用集合去重和目录级组合指纹，成功且未变化的目标在每日任务中直接跳过。
+- 增加预演、单次上限、目标间隔、异常重试、周期完整复核、任务进度和运行摘要。
+- 使用进程内锁和文件锁阻止 Cron、立即运行、插件热重载之间的任务重叠。
+- 单个目标异常不会中断整批；部分完成不会写入成功缓存，下次会继续重试。
+
+### 安全启用顺序
+
+1. 安装后保持插件停用，并保留默认的“预演模式”。
+2. 先只配置一个小目录，勾选“立即运行一次”，检查插件页面、日志和通知摘要。
+3. 关闭预演，对同一个小目录再次运行，确认只补齐缺失文件且没有覆盖已有 NFO。
+4. 验证成功后再扩大路径范围。
+5. 最后停用官方“媒体库刮削”，再启用修复版定时任务，避免两个插件同时处理相同目录。
+
+增量扫描仍会枚举配置目录中的媒体文件，但不会对未变化且近期成功的目标调用识别、图片和写入流程。默认每 7 天完整复核一次，以恢复被单独删除的 NFO 或图片；设置为 `0` 可关闭周期复核。
+
 ## 清理媒体文件（修复版）
 
 插件 ID：`RemoveLinkFix`，当前版本：`2.17`。
@@ -31,6 +56,7 @@
 ```text
 MoviePilot-Plugins-repair-shop/
 ├── icons/Ombi_A.png
+├── plugins.v2/libraryscraperfix/__init__.py
 ├── plugins.v2/removelinkfix/__init__.py
 └── package.v2.json
 ```
@@ -46,4 +72,4 @@ MoviePilot-Plugins-repair-shop/
 
 ## 致谢与许可
 
-原插件作者为 [DzAvril](https://github.com/DzAvril/MoviePilot-Plugins)。本仓库保留原项目 GPL-3.0 许可，修改内容同样以 GPL-3.0 发布。
+`RemoveLinkFix` 上游作者为 [DzAvril](https://github.com/DzAvril/MoviePilot-Plugins)，`LibraryScraperFix` 上游作者为 [jxxghp](https://github.com/jxxghp/MoviePilot-Plugins)。本仓库保留原项目 GPL-3.0 许可，修改内容同样以 GPL-3.0 发布。

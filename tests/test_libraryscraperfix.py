@@ -97,6 +97,13 @@ class _MediaChain:
         return copied
 
 
+class _TmdbChain:
+    episodes = []
+
+    def tmdb_episodes(self, *_args):
+        return self.episodes
+
+
 class _CronTrigger:
     @staticmethod
     def from_crontab(value):
@@ -152,6 +159,7 @@ settings = types.SimpleNamespace(
 )
 
 _module("app.chain.media", MediaChain=_MediaChain, scraping_lock=threading.Lock())
+_module("app.chain.tmdb", TmdbChain=_TmdbChain)
 _module("app.core.config", settings=settings)
 _module("app.core.metainfo", MetaInfoPath=_MetaInfoPath)
 _module("app.db.transferhistory_oper", TransferHistoryOper=object)
@@ -192,6 +200,10 @@ class LibraryScraperFixTests(unittest.TestCase):
         plugin._retry_count = 0
         plugin._full_scan_days = 7
         plugin._notify = False
+        plugin._repair_nfo_enabled = False
+        plugin._nfo_audit_days = 30
+        plugin._nfo_repair_state = {}
+        plugin._active_summary = None
         plugin._cancel_event = threading.Event()
         plugin._running_status = {}
         plugin.get_data_path = self._test_data_path
@@ -653,6 +665,161 @@ class LibraryScraperFixTests(unittest.TestCase):
             self.assertEqual(plugin.run(), (False, "已有任务运行"))
         finally:
             plugin._run_lock.release()
+
+    def _repairable_episode(self, plugin, media, *, title="第 15 集", plot="", outline=""):
+        nfo = media.with_suffix(".nfo")
+        nfo.write_text(
+            "<episodedetails>"
+            f"<title>{title}</title><plot>{plot}</plot><outline>{outline}</outline>"
+            "</episodedetails>",
+            encoding="utf-8",
+        )
+        plugin._repair_nfo_enabled = True
+        plugin._dry_run = False
+        plugin._nfo_repair_state = {}
+        plugin._active_summary = plugin._new_summary(plugin._now())
+        _TmdbChain.episodes = [
+            {
+                "episode_number": 15,
+                "name": "真相浮现",
+                "overview": "这是 TMDB 提供的剧情简介。",
+            }
+        ]
+        return nfo
+
+    @staticmethod
+    def _episode_meta(_path):
+        return types.SimpleNamespace(begin_season=1, begin_episode=15)
+
+    def test_nfo_repair_fills_missing_plot_and_outline(self):
+        plugin = self.plugin()
+        with tempfile.TemporaryDirectory() as tmp:
+            media = Path(tmp) / "Show.S01E15.mkv"
+            media.touch()
+            nfo = self._repairable_episode(plugin, media, title="已有标题")
+            mediainfo = types.SimpleNamespace(tmdb_id=289139, episode_group=None)
+
+            with mock.patch.object(PLUGIN, "MetaInfoPath", self._episode_meta):
+                plugin._repair_nfo_target(media, _MediaType.TV, plugin._target_file, mediainfo)
+
+            root = PLUGIN.ET.parse(nfo).getroot()
+            self.assertEqual(root.findtext("title"), "已有标题")
+            self.assertEqual(root.findtext("plot"), "这是 TMDB 提供的剧情简介。")
+            self.assertEqual(root.findtext("outline"), "这是 TMDB 提供的剧情简介。")
+            self.assertEqual(plugin._active_summary["nfo_overviews_updated"], 1)
+
+    def test_nfo_repair_replaces_generic_episode_title_only(self):
+        plugin = self.plugin()
+        with tempfile.TemporaryDirectory() as tmp:
+            media = Path(tmp) / "Show.S01E15.mkv"
+            media.touch()
+            nfo = self._repairable_episode(plugin, media)
+            mediainfo = types.SimpleNamespace(tmdb_id=289139, episode_group=None)
+
+            with mock.patch.object(PLUGIN, "MetaInfoPath", self._episode_meta):
+                plugin._repair_nfo_target(media, _MediaType.TV, plugin._target_file, mediainfo)
+
+            self.assertEqual(PLUGIN.ET.parse(nfo).getroot().findtext("title"), "真相浮现")
+            self.assertEqual(plugin._active_summary["nfo_titles_updated"], 1)
+
+    def test_nfo_repair_preserves_specific_title_and_generic_tmdb_title(self):
+        plugin = self.plugin()
+        with tempfile.TemporaryDirectory() as tmp:
+            media = Path(tmp) / "Show.S01E15.mkv"
+            media.touch()
+            nfo = self._repairable_episode(plugin, media, title="原有正确标题")
+            mediainfo = types.SimpleNamespace(tmdb_id=289139, episode_group=None)
+
+            with mock.patch.object(PLUGIN, "MetaInfoPath", self._episode_meta):
+                plugin._repair_nfo_target(media, _MediaType.TV, plugin._target_file, mediainfo)
+            self.assertEqual(PLUGIN.ET.parse(nfo).getroot().findtext("title"), "原有正确标题")
+
+            _TmdbChain.episodes[0]["name"] = "Episode 15"
+            nfo.write_text(
+                "<episodedetails><title>第 15 集</title></episodedetails>", encoding="utf-8"
+            )
+            with mock.patch.object(PLUGIN, "MetaInfoPath", self._episode_meta):
+                plugin._repair_nfo_target(media, _MediaType.TV, plugin._target_file, mediainfo)
+            self.assertEqual(PLUGIN.ET.parse(nfo).getroot().findtext("title"), "第 15 集")
+
+    def test_nfo_repair_preview_does_not_write_or_cache(self):
+        plugin = self.plugin()
+        plugin._dry_run = True
+        with tempfile.TemporaryDirectory() as tmp:
+            media = Path(tmp) / "Show.S01E15.mkv"
+            media.touch()
+            nfo = self._repairable_episode(plugin, media)
+            plugin._dry_run = True
+            original = nfo.read_bytes()
+            mediainfo = types.SimpleNamespace(tmdb_id=289139, episode_group=None)
+
+            with mock.patch.object(PLUGIN, "MetaInfoPath", self._episode_meta):
+                plugin._repair_nfo_target(media, _MediaType.TV, plugin._target_file, mediainfo)
+
+            self.assertEqual(nfo.read_bytes(), original)
+            self.assertEqual(plugin._nfo_repair_state, {})
+            self.assertEqual(plugin._active_summary["nfo_preview"], 1)
+
+    def test_nfo_repair_cache_rechecks_changed_or_expired_nfo(self):
+        plugin = self.plugin()
+        plugin._repair_nfo_enabled = True
+        plugin._dry_run = False
+        with tempfile.TemporaryDirectory() as tmp:
+            media = Path(tmp) / "Show.S01E15.mkv"
+            media.touch()
+            nfo = media.with_suffix(".nfo")
+            nfo.write_text("<episodedetails />", encoding="utf-8")
+            target = ScrapeTarget(
+                path=media,
+                mtype=_MediaType.TV,
+                target_type=plugin._target_file,
+                source_root=Path(tmp),
+            )
+            plugin._remember_nfo_repair_state(nfo, "checked")
+            self.assertFalse(plugin._nfo_repair_due(target))
+
+            nfo.write_text("<episodedetails><plot>changed</plot></episodedetails>", encoding="utf-8")
+            self.assertTrue(plugin._nfo_repair_due(target))
+
+            plugin._remember_nfo_repair_state(nfo, "checked")
+            plugin._nfo_audit_days = 1
+            plugin._nfo_repair_state[str(nfo)]["updated_at"] = "2000-01-01T00:00:00+00:00"
+            self.assertTrue(plugin._nfo_repair_due(target))
+
+    def test_nfo_repair_due_ignores_directory_targets(self):
+        plugin = self.plugin()
+        plugin._repair_nfo_enabled = True
+        with tempfile.TemporaryDirectory() as tmp:
+            directory = Path(tmp) / "Show"
+            directory.mkdir()
+            directory.with_suffix(".nfo").write_text("<tvshow />", encoding="utf-8")
+            target = ScrapeTarget(
+                path=directory,
+                mtype=_MediaType.TV,
+                target_type=plugin._target_dir,
+                source_root=Path(tmp),
+            )
+
+            self.assertFalse(plugin._nfo_repair_due(target))
+
+    def test_nfo_repair_processes_episode_files_in_directory_target(self):
+        plugin = self.plugin()
+        with tempfile.TemporaryDirectory() as tmp:
+            directory = Path(tmp) / "Show" / "Season 1"
+            directory.mkdir(parents=True)
+            media = directory / "Show.S01E15.mkv"
+            media.touch()
+            nfo = self._repairable_episode(plugin, media)
+            mediainfo = types.SimpleNamespace(tmdb_id=289139, episode_group=None)
+
+            with mock.patch.object(PLUGIN, "MetaInfoPath", self._episode_meta):
+                plugin._repair_nfo_target(
+                    directory.parent, _MediaType.TV, plugin._target_dir, mediainfo
+                )
+
+            root = PLUGIN.ET.parse(nfo).getroot()
+            self.assertEqual(root.findtext("title"), "真相浮现")
+            self.assertEqual(root.findtext("plot"), "这是 TMDB 提供的剧情简介。")
 
 
 if __name__ == "__main__":

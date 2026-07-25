@@ -511,6 +511,24 @@ class LibraryScraperFixTests(unittest.TestCase):
         state = {target.key: plugin._state_entry(target, outcome.status)}
         self.assertFalse(plugin._should_skip_target(target, state))
 
+    def test_scrape_target_passes_cancel_event_before_source_root(self):
+        plugin = self.plugin()
+        target = ScrapeTarget(
+            path=Path("/media/Show.S01E01.mkv"),
+            mtype=_MediaType.TV,
+            target_type=plugin._target_file,
+            source_root=Path("/media"),
+        )
+        cancel_event = threading.Event()
+
+        with mock.patch.object(plugin, "_scrape_one", return_value=True) as scrape:
+            outcome = plugin._scrape_target(target, [], cancel_event)
+
+        self.assertEqual(outcome.status, "success")
+        args = scrape.call_args.args
+        self.assertIs(args[4], cancel_event)
+        self.assertEqual(args[5], target.source_root)
+
     def test_stale_incremental_state_is_pruned_only_after_clean_scan(self):
         target = ScrapeTarget(
             path=Path("/media/Movie"),

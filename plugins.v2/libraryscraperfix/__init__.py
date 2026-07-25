@@ -2,9 +2,11 @@ from __future__ import annotations
 
 import hashlib
 import os
+import re
 import threading
 import time
 import traceback
+import xml.etree.ElementTree as ET
 from copy import copy
 from contextlib import contextmanager
 from dataclasses import dataclass
@@ -18,6 +20,7 @@ from apscheduler.triggers.cron import CronTrigger
 
 from app import schemas
 from app.chain.media import MediaChain
+from app.chain.tmdb import TmdbChain
 from app.core.config import settings
 from app.core.metainfo import MetaInfoPath
 from app.db.transferhistory_oper import TransferHistoryOper
@@ -118,13 +121,13 @@ class _NonOverwritingPolicies:
 
 
 class LibraryScraperFix(_PluginBase):
-    plugin_name = "媒体库刮削（修复版）"
-    plugin_desc = "安全增量刮削媒体库，修复排除路径、NFO ID、覆盖策略、任务重入及大库性能问题。"
+    plugin_name = "媒体库刮削(魔改版)"
+    plugin_desc = "安全增量刮削媒体库，支持 NFO 空白概要与通用标题修复。"
     plugin_icon = (
         "https://raw.githubusercontent.com/Wning-ady/"
         "MoviePilot-Plugins-repair-shop/main/icons/Ombi_A.png"
     )
-    plugin_version = "1.0.2"
+    plugin_version = "1.1.0"
     plugin_author = "jxxghp,Wning-ady"
     author_url = "https://github.com/Wning-ady/MoviePilot-Plugins-repair-shop"
     plugin_config_prefix = "libraryscraperfix_"
@@ -135,6 +138,7 @@ class LibraryScraperFix(_PluginBase):
     _target_dir = "dir"
     _target_file = "file"
     _state_key = "scan_state_v1"
+    _nfo_repair_state_key = "nfo_repair_state_v1"
     _last_run_key = "last_run"
     _history_key = "run_history"
     _run_lock = threading.Lock()
@@ -154,6 +158,8 @@ class LibraryScraperFix(_PluginBase):
     _retry_count = 1
     _full_scan_days = 7
     _notify = True
+    _repair_nfo_enabled = False
+    _nfo_audit_days = 30
 
     def init_plugin(self, config: dict = None):
         self.stop_service()
@@ -166,7 +172,7 @@ class LibraryScraperFix(_PluginBase):
         self._cron = str(config.get("cron") or "0 3 * * *").strip()
         self._mode = str(config.get("mode") or "").strip()
         if self._mode not in ("", "force_all"):
-            logger.warning(f"媒体库刮削修复版覆盖模式无效，已按不覆盖处理：{self._mode}")
+            logger.warning(f"媒体库刮削(魔改版)覆盖模式无效，已按不覆盖处理：{self._mode}")
             self._mode = ""
         self._scraper_paths = str(config.get("scraper_paths") or "")
         self._exclude_paths = str(config.get("exclude_paths") or "")
@@ -182,12 +188,17 @@ class LibraryScraperFix(_PluginBase):
             config.get("full_scan_days"), 7, 0, 365
         )
         self._notify = bool(config.get("notify", True))
+        self._repair_nfo_enabled = bool(config.get("repair_nfo_fields", False))
+        self._nfo_audit_days = self._bounded_int(
+            config.get("nfo_audit_days"), 30, 0, 365
+        )
 
         clear_cache = bool(config.get("clear_cache", False))
         if clear_cache:
             try:
                 self.del_data(self._state_key)
-                logger.info("媒体库刮削修复版增量缓存已清空")
+                self.del_data(self._nfo_repair_state_key)
+                logger.info("媒体库刮削(魔改版)增量缓存已清空")
             except Exception as err:
                 logger.error(f"清空媒体库刮削增量缓存失败：{err}")
 
@@ -206,7 +217,7 @@ class LibraryScraperFix(_PluginBase):
                     trigger="date",
                     run_date=datetime.now(tz=pytz.timezone(settings.TZ))
                     + timedelta(seconds=3),
-                    name="媒体库刮削（修复版）",
+                    name="媒体库刮削(魔改版)",
                     max_instances=1,
                     coalesce=True,
                 )
@@ -228,7 +239,7 @@ class LibraryScraperFix(_PluginBase):
         try:
             trigger = CronTrigger.from_crontab(self._cron)
         except (TypeError, ValueError) as err:
-            message = f"媒体库刮削修复版 Cron 无效，不会注册定时任务：{self._cron} ({err})"
+            message = f"媒体库刮削(魔改版) Cron 无效，不会注册定时任务：{self._cron} ({err})"
             logger.error(message)
             try:
                 self.systemmessage.put(message)
@@ -238,7 +249,7 @@ class LibraryScraperFix(_PluginBase):
         return [
             {
                 "id": "LibraryScraperFix",
-                "name": "媒体库刮削（修复版）",
+                "name": "媒体库刮削(魔改版)",
                 "trigger": trigger,
                 "func": self.run,
                 "kwargs": {},
@@ -259,6 +270,7 @@ class LibraryScraperFix(_PluginBase):
                             self._switch("incremental", "增量扫描"),
                             self._switch("force_full_scan", "下次忽略增量缓存"),
                             self._switch("notify", "发送运行摘要"),
+                            self._switch("repair_nfo_fields", "修复空白概要和通用标题"),
                         ],
                     },
                     {
@@ -310,6 +322,7 @@ class LibraryScraperFix(_PluginBase):
                             self._number_field("interval_seconds", "目标间隔（秒）", 0, 30, step=0.1),
                             self._number_field("retry_count", "异常重试次数", 0, 3),
                             self._number_field("full_scan_days", "完整复核间隔（天）", 0, 365),
+                            self._number_field("nfo_audit_days", "NFO 字段复核间隔（天）", 0, 365),
                         ],
                     },
                     {
@@ -407,13 +420,13 @@ class LibraryScraperFix(_PluginBase):
 
     def run(self, progress_callback=None):
         if not self._run_lock.acquire(blocking=False):
-            logger.warning("媒体库刮削修复版已有任务运行，本次触发已跳过")
+            logger.warning("媒体库刮削(魔改版)已有任务运行，本次触发已跳过")
             return False, "已有任务运行"
 
         lock_acquired, lock_fd = self._acquire_run_file_lock()
         if not lock_acquired:
             self._run_lock.release()
-            logger.warning("媒体库刮削修复版已有跨重载任务运行，本次触发已跳过")
+            logger.warning("媒体库刮削(魔改版)已有跨重载任务运行，本次触发已跳过")
             return False, "已有跨重载任务运行"
 
         cancel_event = self._cancel_event
@@ -421,6 +434,9 @@ class LibraryScraperFix(_PluginBase):
         started_at = self._now()
         summary = self._new_summary(started_at)
         scan_state = self._load_scan_state()
+        self._nfo_repair_state = self._load_nfo_repair_state()
+        self._tmdb_episode_cache: Dict[Tuple[int, int], List[Any]] = {}
+        self._active_summary = summary
         try:
             if self._force_full_scan:
                 self.update_config(
@@ -441,7 +457,7 @@ class LibraryScraperFix(_PluginBase):
             )
             candidates = []
             for target in ordered_targets:
-                if self._should_skip_target(target, scan_state):
+                if self._should_skip_target(target, scan_state) and not self._nfo_repair_due(target):
                     summary["unchanged"] += 1
                 else:
                     candidates.append(target)
@@ -492,6 +508,7 @@ class LibraryScraperFix(_PluginBase):
                         break
 
             self._save_scan_state(scan_state)
+            self._save_nfo_repair_state(self._nfo_repair_state)
             complete = (
                 not summary["failed"]
                 and not summary["partial"]
@@ -501,7 +518,7 @@ class LibraryScraperFix(_PluginBase):
         except Exception as err:
             summary["failed"] += 1
             self._remember_failure(summary, "任务", str(err))
-            logger.error(f"媒体库刮削修复版任务异常：{err}")
+            logger.error(f"媒体库刮削(魔改版)任务异常：{err}")
             logger.debug(traceback.format_exc())
             return False, str(err)
         finally:
@@ -512,6 +529,7 @@ class LibraryScraperFix(_PluginBase):
             self._progress(progress_callback, 100, "任务结束", summary)
             self._force_full_scan = False
             self._running_status = {}
+            self._active_summary = None
             self._release_run_file_lock(lock_fd)
             self._run_lock.release()
 
@@ -527,7 +545,7 @@ class LibraryScraperFix(_PluginBase):
             if scheduler.running:
                 scheduler.shutdown(wait=False)
         except Exception as err:
-            logger.warning(f"停止媒体库刮削修复版一次性任务失败：{err}")
+            logger.warning(f"停止媒体库刮削(魔改版)一次性任务失败：{err}")
         finally:
             self._scheduler = None
 
@@ -774,6 +792,8 @@ class LibraryScraperFix(_PluginBase):
         if not mediainfo:
             return False
 
+        self._repair_nfo_target(path, mtype, target_type, mediainfo)
+
         if not settings.SCRAP_FOLLOW_TMDB:
             transfer_history = TransferHistoryOper().get_by_type_tmdbid(
                 tmdbid=mediainfo.tmdb_id, mtype=mediainfo.type.value
@@ -828,6 +848,213 @@ class LibraryScraperFix(_PluginBase):
             if policy_view is not None and media_chain.scraping_policies is policy_view:
                 media_chain.scraping_policies = original_policies
             scraping_lock.release()
+
+    def _repair_nfo_target(
+        self, path: Path, mtype: MediaType, target_type: str, mediainfo: Any
+    ) -> None:
+        if not self._repair_nfo_enabled or mtype != MediaType.TV:
+            return
+        if target_type == self._target_file:
+            self._repair_episode_nfo(path, mediainfo)
+            return
+        extensions = {str(ext).lower() for ext in settings.RMT_MEDIAEXT}
+        for current, _dirs, filenames in os.walk(path, followlinks=False):
+            for filename in filenames:
+                episode_path = Path(current) / filename
+                if (
+                    episode_path.suffix.lower() in extensions
+                    and not episode_path.is_symlink()
+                ):
+                    self._repair_episode_nfo(episode_path, mediainfo)
+
+    def _repair_episode_nfo(self, path: Path, mediainfo: Any) -> None:
+        nfo_path = path.with_suffix(".nfo")
+        if not nfo_path.exists() or nfo_path.is_symlink():
+            return
+        if not self._nfo_path_due(nfo_path):
+            return
+
+        summary = getattr(self, "_active_summary", None)
+        if summary is not None:
+            summary["nfo_checked"] += 1
+        try:
+            tree = ET.parse(nfo_path)
+            root = tree.getroot()
+        except (ET.ParseError, OSError) as err:
+            logger.warning(f"NFO 字段修复跳过，无法解析：{nfo_path} - {err}")
+            return
+        if root.tag.lower() != "episodedetails":
+            return
+
+        meta = MetaInfoPath(path)
+        season = getattr(meta, "begin_season", None)
+        episode = getattr(meta, "begin_episode", None)
+        tmdbid = self._valid_tmdbid(getattr(mediainfo, "tmdb_id", None))
+        if not season or not episode or not tmdbid:
+            return
+        episode_data = self._tmdb_episode_data(
+            tmdbid, int(season), int(episode), getattr(mediainfo, "episode_group", None)
+        )
+        if not episode_data:
+            return
+
+        updates = {}
+        source_title = self._text_value(episode_data, "name")
+        source_overview = self._text_value(episode_data, "overview")
+        existing_title = self._xml_text(root, "title")
+        if source_title and (
+            not existing_title or self._is_generic_episode_title(existing_title)
+        ) and not self._is_generic_episode_title(source_title):
+            updates["title"] = source_title
+        for field in ("plot", "outline"):
+            if source_overview and not self._xml_text(root, field):
+                updates[field] = source_overview
+        if not updates:
+            self._remember_nfo_repair_state(nfo_path, "checked")
+            return
+
+        preview = ", ".join(sorted(updates))
+        if self._dry_run:
+            logger.info(f"预演 NFO 字段修复：{nfo_path} - {preview}")
+            if summary is not None:
+                summary["nfo_preview"] += 1
+            return
+
+        for field, value in updates.items():
+            element = root.find(field)
+            if element is None:
+                element = ET.SubElement(root, field)
+            element.text = value
+        temp_path = nfo_path.with_suffix(f"{nfo_path.suffix}.libraryscraperfix.tmp")
+        try:
+            tree.write(temp_path, encoding="utf-8", xml_declaration=True)
+            os.replace(temp_path, nfo_path)
+            self._remember_nfo_repair_state(nfo_path, "updated")
+            logger.info(f"已修复 NFO 字段：{nfo_path} - {preview}")
+            if summary is not None:
+                summary["nfo_updated"] += 1
+                if "title" in updates:
+                    summary["nfo_titles_updated"] += 1
+                if "plot" in updates or "outline" in updates:
+                    summary["nfo_overviews_updated"] += 1
+        except OSError as err:
+            try:
+                temp_path.unlink(missing_ok=True)
+            except OSError:
+                pass
+            logger.warning(f"NFO 字段修复写入失败：{nfo_path} - {err}")
+
+    @staticmethod
+    def _xml_text(root: ET.Element, field: str) -> str:
+        element = root.find(field)
+        return (element.text or "").strip() if element is not None else ""
+
+    @staticmethod
+    def _text_value(value: Any, field: str) -> str:
+        raw = value.get(field) if isinstance(value, dict) else getattr(value, field, None)
+        return str(raw).strip() if raw is not None else ""
+
+    @staticmethod
+    def _is_generic_episode_title(value: str) -> bool:
+        return bool(
+            re.fullmatch(
+                r"(?:第\s*\d+\s*集|Episode\s*\d+|S\d+\s*E\d+)",
+                value.strip(),
+                flags=re.IGNORECASE,
+            )
+        )
+
+    def _tmdb_episode_data(
+        self, tmdbid: int, season: int, episode: int, episode_group: Optional[str]
+    ) -> Optional[Any]:
+        cache = getattr(self, "_tmdb_episode_cache", {})
+        cache_key = (tmdbid, season)
+        try:
+            if cache_key not in cache:
+                # MoviePilot's public TmdbChain interface accepts a series ID and season.
+                cache[cache_key] = TmdbChain().tmdb_episodes(tmdbid, season) or []
+            episodes = cache[cache_key]
+        except Exception as err:
+            logger.warning(f"读取 TMDB 剧集信息失败：{tmdbid} S{season:02d}E{episode:02d} - {err}")
+            return None
+        for item in episodes or []:
+            number = item.get("episode_number") if isinstance(item, dict) else getattr(item, "episode_number", None)
+            if number == episode:
+                return item
+        return None
+
+    def _nfo_repair_due(self, target: ScrapeTarget) -> bool:
+        if not self._repair_nfo_enabled or target.mtype != MediaType.TV:
+            return False
+        nfo_paths = [target.path.with_suffix(".nfo")]
+        if target.target_type == self._target_dir:
+            nfo_paths = [
+                item.with_suffix(".nfo")
+                for item in target.path.rglob("*")
+                if item.is_file()
+                and not item.is_symlink()
+                and item.suffix.lower() in {str(ext).lower() for ext in settings.RMT_MEDIAEXT}
+            ]
+        if not nfo_paths:
+            return False
+        state = getattr(self, "_nfo_repair_state", {})
+        for nfo_path in nfo_paths:
+            if not nfo_path.exists() or nfo_path.is_symlink():
+                continue
+            if self._nfo_path_due(nfo_path):
+                return True
+        return False
+
+    def _nfo_path_due(self, nfo_path: Path) -> bool:
+        state = getattr(self, "_nfo_repair_state", {})
+        try:
+            entry = state.get(str(nfo_path))
+            fingerprint = self._nfo_fingerprint(nfo_path)
+        except OSError:
+            return True
+        if not entry or entry.get("fingerprint") != fingerprint:
+            return True
+        if self._nfo_audit_days:
+            try:
+                age = (datetime.now().astimezone() - datetime.fromisoformat(entry["updated_at"])).total_seconds()
+                return age >= self._nfo_audit_days * 86400
+            except (KeyError, TypeError, ValueError):
+                return True
+        return False
+
+    @staticmethod
+    def _nfo_fingerprint(nfo_path: Path) -> List[Any]:
+        stat_result = nfo_path.stat()
+        mtime_ns = int(getattr(stat_result, "st_mtime_ns", stat_result.st_mtime * 1_000_000_000))
+        digest = hashlib.blake2b(nfo_path.read_bytes(), digest_size=8).hexdigest()
+        return [int(stat_result.st_size), mtime_ns, digest]
+
+    def _remember_nfo_repair_state(self, nfo_path: Path, status: str) -> None:
+        state = getattr(self, "_nfo_repair_state", None)
+        if state is None or self._dry_run:
+            return
+        try:
+            state[str(nfo_path)] = {
+                "fingerprint": self._nfo_fingerprint(nfo_path),
+                "status": status,
+                "updated_at": self._now(),
+            }
+        except OSError as err:
+            logger.warning(f"保存 NFO 字段缓存失败：{nfo_path} - {err}")
+
+    def _load_nfo_repair_state(self) -> Dict[str, Any]:
+        try:
+            state = self.get_data(self._nfo_repair_state_key)
+            return state if isinstance(state, dict) else {}
+        except Exception as err:
+            logger.error(f"读取 NFO 字段缓存失败，将执行检查：{err}")
+            return {}
+
+    def _save_nfo_repair_state(self, state: Dict[str, Any]) -> None:
+        try:
+            self.save_data(self._nfo_repair_state_key, state)
+        except Exception as err:
+            logger.error(f"保存 NFO 字段缓存失败：{err}")
 
     def _tmdbid_for_target(
         self,
@@ -1261,6 +1488,8 @@ class LibraryScraperFix(_PluginBase):
             "retry_count": self._retry_count,
             "full_scan_days": self._full_scan_days,
             "notify": self._notify,
+            "repair_nfo_fields": self._repair_nfo_enabled,
+            "nfo_audit_days": self._nfo_audit_days,
             "clear_cache": clear_cache,
         }
 
@@ -1281,6 +1510,8 @@ class LibraryScraperFix(_PluginBase):
             "retry_count": 1,
             "full_scan_days": 7,
             "notify": True,
+            "repair_nfo_fields": False,
+            "nfo_audit_days": 30,
             "clear_cache": False,
         }
 
@@ -1323,6 +1554,11 @@ class LibraryScraperFix(_PluginBase):
             "excluded_files": 0,
             "invalid_paths": 0,
             "stale_state_removed": 0,
+            "nfo_checked": 0,
+            "nfo_preview": 0,
+            "nfo_updated": 0,
+            "nfo_titles_updated": 0,
+            "nfo_overviews_updated": 0,
             "failures": [],
         }
         return summary
@@ -1361,6 +1597,17 @@ class LibraryScraperFix(_PluginBase):
         ]
         if summary.get("cancelled"):
             lines.append("状态：已取消")
+        if summary.get("nfo_checked"):
+            lines.append(
+                "NFO 字段：检查 %s，预演 %s，已修复 %s（标题 %s，概要 %s）"
+                % (
+                    summary.get("nfo_checked", 0),
+                    summary.get("nfo_preview", 0),
+                    summary.get("nfo_updated", 0),
+                    summary.get("nfo_titles_updated", 0),
+                    summary.get("nfo_overviews_updated", 0),
+                )
+            )
         failures = summary.get("failures") or []
         if failures:
             lines.append("前几项问题：")
@@ -1378,4 +1625,10 @@ class LibraryScraperFix(_PluginBase):
             f"未识别：{summary.get('unrecognized', 0)}，失败：{summary.get('failed', 0)}\n"
             f"未变化跳过：{summary.get('unchanged', 0)}，耗时："
             f"{summary.get('duration_seconds', 0)} 秒"
+            + (
+                f"\nNFO：检查 {summary.get('nfo_checked', 0)}，修复 "
+                f"{summary.get('nfo_updated', 0)}"
+                if summary.get("nfo_checked")
+                else ""
+            )
         )

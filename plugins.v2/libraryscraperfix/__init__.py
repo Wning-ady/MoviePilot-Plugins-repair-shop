@@ -124,7 +124,7 @@ class LibraryScraperFix(_PluginBase):
         "https://raw.githubusercontent.com/Wning-ady/"
         "MoviePilot-Plugins-repair-shop/main/icons/Ombi_A.png"
     )
-    plugin_version = "1.0.0"
+    plugin_version = "1.0.1"
     plugin_author = "jxxghp,Wning-ady"
     author_url = "https://github.com/Wning-ady/MoviePilot-Plugins-repair-shop"
     plugin_config_prefix = "libraryscraperfix_"
@@ -689,6 +689,7 @@ class LibraryScraperFix(_PluginBase):
             target.mtype,
             target.target_type,
             target.tmdbid,
+            target.source_root,
             cancel_event,
         ):
             return ScrapeOutcome(status="success", scraped_files=target.file_count)
@@ -728,6 +729,7 @@ class LibraryScraperFix(_PluginBase):
                     child_mtype,
                     self._target_file,
                     self._valid_tmdbid(getattr(child_meta, "tmdbid", None)),
+                    target.source_root,
                     cancel_event,
                 )
                 if recognized:
@@ -755,10 +757,13 @@ class LibraryScraperFix(_PluginBase):
         target_type: str,
         tmdbid: Optional[int],
         cancel_event: threading.Event,
+        source_root: Optional[Path] = None,
     ) -> bool:
         if cancel_event.is_set():
             return False
-        tmdbid = self._tmdbid_for_target(path, mtype, target_type, tmdbid)
+        tmdbid = self._tmdbid_for_target(
+            path, mtype, target_type, tmdbid, source_root
+        )
         if tmdbid:
             logger.info(f"使用 TMDB ID 识别：{tmdbid} - {path}")
             mediainfo = self.chain.recognize_media(tmdbid=tmdbid, mtype=mtype)
@@ -830,10 +835,15 @@ class LibraryScraperFix(_PluginBase):
         mtype: MediaType,
         target_type: str,
         fallback_tmdbid: Optional[int],
+        source_root: Optional[Path] = None,
     ) -> Optional[int]:
         tmdbid = self._valid_tmdbid(fallback_tmdbid)
         nfo_candidates = []
-        if target_type == self._target_file:
+        if target_type == self._target_file and mtype == MediaType.TV:
+            # Episode NFO files carry episode IDs. MediaChain needs a TV-series ID,
+            # so resolve the nearest series-level tvshow.nfo instead.
+            nfo_candidates.extend(self._tvshow_nfo_candidates(path, source_root))
+        elif target_type == self._target_file:
             nfo_candidates.append(path.with_suffix(".nfo"))
         elif mtype == MediaType.MOVIE:
             nfo_candidates.extend([path / "movie.nfo", path / f"{path.stem}.nfo"])
@@ -847,6 +857,22 @@ class LibraryScraperFix(_PluginBase):
             if nfo_tmdbid:
                 return nfo_tmdbid
         return tmdbid
+
+    @classmethod
+    def _tvshow_nfo_candidates(
+        cls, media_path: Path, source_root: Optional[Path]
+    ) -> List[Path]:
+        candidates = []
+        current = cls._normalize_path(media_path.parent)
+        root = cls._normalize_path(source_root) if source_root else None
+        while current != current.parent:
+            candidates.append(current / "tvshow.nfo")
+            if root and current == root:
+                break
+            if root and not cls._is_within(current.parent, root):
+                break
+            current = current.parent
+        return candidates
 
     @staticmethod
     def _get_tmdbid_from_nfo(file_path: Path) -> Optional[int]:

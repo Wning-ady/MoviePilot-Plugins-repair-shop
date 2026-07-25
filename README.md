@@ -4,7 +4,7 @@
 
 ## 媒体库刮削（修复版）
 
-插件 ID：`LibraryScraperFix`，当前版本：`1.0.0`。
+插件 ID：`LibraryScraperFix`，当前版本：`1.0.1`。
 
 本插件基于官方 [LibraryScraper 2.1.3](https://github.com/jxxghp/MoviePilot-Plugins/tree/main/plugins.v2/libraryscraper)，使用独立插件 ID，不覆盖官方插件。主要改进：
 

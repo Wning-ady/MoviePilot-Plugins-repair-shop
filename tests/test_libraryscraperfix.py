@@ -377,6 +377,57 @@ class LibraryScraperFixTests(unittest.TestCase):
 
             self.assertEqual(result, 456)
 
+    def test_tv_file_uses_nearest_tvshow_nfo_not_episode_nfo(self):
+        class Reader:
+            def __init__(self, path):
+                self.path = Path(path)
+
+            def get_element_value(self, xpath):
+                if xpath != "tmdbid":
+                    return None
+                return "123" if self.path.name == "tvshow.nfo" else "6139006"
+
+        plugin = self.plugin()
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "Show (2026)"
+            season = root / "Season 1"
+            season.mkdir(parents=True)
+            media = season / "Show.S01E01.mkv"
+            media.touch()
+            media.with_suffix(".nfo").touch()
+            (root / "tvshow.nfo").touch()
+
+            with mock.patch.object(PLUGIN, "NfoReader", Reader):
+                result = plugin._tmdbid_for_target(
+                    media, _MediaType.TV, plugin._target_file, None, root
+                )
+
+            self.assertEqual(result, 123)
+
+    def test_tv_file_does_not_use_episode_nfo_as_series_id(self):
+        class Reader:
+            def __init__(self, _path):
+                pass
+
+            def get_element_value(self, xpath):
+                return "6139006" if xpath == "tmdbid" else None
+
+        plugin = self.plugin()
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "Show (2026)"
+            season = root / "Season 1"
+            season.mkdir(parents=True)
+            media = season / "Show.S01E01.mkv"
+            media.touch()
+            media.with_suffix(".nfo").touch()
+
+            with mock.patch.object(PLUGIN, "NfoReader", Reader):
+                result = plugin._tmdbid_for_target(
+                    media, _MediaType.TV, plugin._target_file, 456, root
+                )
+
+            self.assertEqual(result, 456)
+
     def test_non_overwrite_policy_preserves_skip_but_disables_overwrite(self):
         overwrite = _Policy(is_skip=False, is_overwrite=True)
         wrapped = PLUGIN._NonOverwritingPolicies(_Policies(overwrite)).option(

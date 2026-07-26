@@ -49,6 +49,7 @@ class ScrapeTarget:
     source_root: Path
     forced_type: Optional[MediaType] = None
     tmdbid: Optional[int] = None
+    doubanid: Optional[str] = None
     file_count: int = 0
     total_size: int = 0
     max_mtime_ns: int = 0
@@ -65,10 +66,16 @@ class ScrapeTarget:
             self.total_size,
             self.max_mtime_ns,
             f"{self.signature:016x}",
+            self.tmdbid,
+            self.doubanid,
         ]
 
     def include_file(
-        self, file_path: Path, stat_result: os.stat_result, tmdbid: Optional[int]
+        self,
+        file_path: Path,
+        stat_result: os.stat_result,
+        tmdbid: Optional[int],
+        doubanid: Optional[str],
     ) -> None:
         mtime_ns = int(
             getattr(stat_result, "st_mtime_ns", stat_result.st_mtime * 1_000_000_000)
@@ -83,6 +90,8 @@ class ScrapeTarget:
         self.signature ^= int.from_bytes(token.digest(), byteorder="big")
         if not self.tmdbid and tmdbid:
             self.tmdbid = tmdbid
+        if not self.doubanid and doubanid:
+            self.doubanid = doubanid
 
 
 @dataclass
@@ -127,7 +136,7 @@ class LibraryScraperFix(_PluginBase):
         "https://raw.githubusercontent.com/Wning-ady/"
         "MoviePilot-Plugins-repair-shop/main/icons/Ombi_A.png"
     )
-    plugin_version = "1.1.0"
+    plugin_version = "1.1.1"
     plugin_author = "jxxghp,Wning-ady"
     author_url = "https://github.com/Wning-ady/MoviePilot-Plugins-repair-shop"
     plugin_config_prefix = "libraryscraperfix_"
@@ -587,6 +596,9 @@ class LibraryScraperFix(_PluginBase):
                         summary["forced_type_skipped"] += 1
                         continue
                     tmdbid = self._valid_tmdbid(getattr(file_meta, "tmdbid", None))
+                    doubanid = self._valid_doubanid(
+                        getattr(file_meta, "doubanid", None)
+                    )
                     item = self._get_scrape_item(file_path, root, mtype)
                     if not item:
                         summary["scan_errors"] += 1
@@ -603,10 +615,11 @@ class LibraryScraperFix(_PluginBase):
                             source_root=root,
                             forced_type=forced_type,
                             tmdbid=tmdbid,
+                            doubanid=doubanid,
                         )
                         targets[key] = target
                         logger.info(f"发现刮削目标：{target_path}")
-                    target.include_file(file_path, stat_result, tmdbid)
+                    target.include_file(file_path, stat_result, tmdbid, doubanid)
                 except (FileNotFoundError, PermissionError, OSError) as err:
                     summary["scan_errors"] += 1
                     self._remember_failure(summary, str(file_path), f"扫描失败：{err}")
@@ -709,6 +722,7 @@ class LibraryScraperFix(_PluginBase):
             target.tmdbid,
             cancel_event,
             target.source_root,
+            target.doubanid,
         ):
             return ScrapeOutcome(status="success", scraped_files=target.file_count)
 
@@ -749,6 +763,7 @@ class LibraryScraperFix(_PluginBase):
                     self._valid_tmdbid(getattr(child_meta, "tmdbid", None)),
                     cancel_event,
                     target.source_root,
+                    self._valid_doubanid(getattr(child_meta, "doubanid", None)),
                 )
                 if recognized:
                     outcome.scraped_files += 1
@@ -776,13 +791,26 @@ class LibraryScraperFix(_PluginBase):
         tmdbid: Optional[int],
         cancel_event: threading.Event,
         source_root: Optional[Path] = None,
+        doubanid: Optional[str] = None,
     ) -> bool:
         if cancel_event.is_set():
             return False
         tmdbid = self._tmdbid_for_target(
             path, mtype, target_type, tmdbid, source_root
         )
-        if tmdbid:
+        doubanid = self._doubanid_for_target(
+            path, mtype, target_type, doubanid, source_root
+        )
+        recognize_source = str(
+            getattr(settings, "RECOGNIZE_SOURCE", "") or ""
+        ).lower()
+        use_douban = bool(doubanid and (recognize_source == "douban" or not tmdbid))
+        if use_douban:
+            logger.info(f"使用豆瓣 ID 识别：{doubanid} - {path}")
+            mediainfo = self.chain.recognize_media(
+                mtype=mtype, doubanid=doubanid
+            )
+        elif tmdbid:
             logger.info(f"使用 TMDB ID 识别：{tmdbid} - {path}")
             mediainfo = self.chain.recognize_media(tmdbid=tmdbid, mtype=mtype)
         else:
@@ -791,12 +819,17 @@ class LibraryScraperFix(_PluginBase):
             mediainfo = self.chain.recognize_media(meta=meta)
         if not mediainfo:
             return False
+        if use_douban:
+            # MoviePilot 2.15+ selects metadata modules per request with this field.
+            # Older releases ignore the dynamic attribute and use SCRAP_SOURCE.
+            mediainfo.scrape_source = "douban"
 
         self._repair_nfo_target(path, mtype, target_type, mediainfo)
 
-        if not settings.SCRAP_FOLLOW_TMDB:
+        media_tmdbid = self._valid_tmdbid(getattr(mediainfo, "tmdb_id", None))
+        if not settings.SCRAP_FOLLOW_TMDB and media_tmdbid:
             transfer_history = TransferHistoryOper().get_by_type_tmdbid(
-                tmdbid=mediainfo.tmdb_id, mtype=mediainfo.type.value
+                tmdbid=media_tmdbid, mtype=mediainfo.type.value
             )
             if transfer_history:
                 mediainfo.title = transfer_history.title
@@ -1065,25 +1098,53 @@ class LibraryScraperFix(_PluginBase):
         source_root: Optional[Path] = None,
     ) -> Optional[int]:
         tmdbid = self._valid_tmdbid(fallback_tmdbid)
-        nfo_candidates = []
-        if target_type == self._target_file and mtype == MediaType.TV:
-            # Episode NFO files carry episode IDs. MediaChain needs a TV-series ID,
-            # so resolve the nearest series-level tvshow.nfo instead.
-            nfo_candidates.extend(self._tvshow_nfo_candidates(path, source_root))
-        elif target_type == self._target_file:
-            nfo_candidates.append(path.with_suffix(".nfo"))
-        elif mtype == MediaType.MOVIE:
-            nfo_candidates.extend([path / "movie.nfo", path / f"{path.stem}.nfo"])
-        elif mtype == MediaType.TV:
-            nfo_candidates.append(path / "tvshow.nfo")
-
-        for nfo_path in nfo_candidates:
+        for nfo_path in self._nfo_candidates_for_target(
+            path, mtype, target_type, source_root
+        ):
             if not nfo_path.exists() or nfo_path.is_symlink():
                 continue
             nfo_tmdbid = self._get_tmdbid_from_nfo(nfo_path)
             if nfo_tmdbid:
                 return nfo_tmdbid
         return tmdbid
+
+    def _doubanid_for_target(
+        self,
+        path: Path,
+        mtype: MediaType,
+        target_type: str,
+        fallback_doubanid: Optional[str],
+        source_root: Optional[Path] = None,
+    ) -> Optional[str]:
+        doubanid = self._valid_doubanid(fallback_doubanid)
+        for nfo_path in self._nfo_candidates_for_target(
+            path, mtype, target_type, source_root
+        ):
+            if not nfo_path.exists() or nfo_path.is_symlink():
+                continue
+            nfo_doubanid = self._get_doubanid_from_nfo(nfo_path)
+            if nfo_doubanid:
+                return nfo_doubanid
+        return doubanid
+
+    @classmethod
+    def _nfo_candidates_for_target(
+        cls,
+        path: Path,
+        mtype: MediaType,
+        target_type: str,
+        source_root: Optional[Path],
+    ) -> List[Path]:
+        if target_type == cls._target_file and mtype == MediaType.TV:
+            # Episode NFO IDs identify episodes, not the parent TV series.
+            return cls._tvshow_nfo_candidates(path, source_root)
+        if target_type == cls._target_file:
+            return [path.with_suffix(".nfo")]
+        if mtype == MediaType.MOVIE:
+            return [path / "movie.nfo", path / f"{path.stem}.nfo"]
+        if mtype == MediaType.TV:
+            return [path / "tvshow.nfo"]
+        return []
 
     @classmethod
     def _tvshow_nfo_candidates(
@@ -1120,6 +1181,26 @@ class LibraryScraperFix(_PluginBase):
         return None
 
     @staticmethod
+    def _get_doubanid_from_nfo(file_path: Path) -> Optional[str]:
+        xpaths = [
+            "uniqueid[@type='Douban']",
+            "uniqueid[@type='douban']",
+            "uniqueid[@type='DOUBAN']",
+            "doubanid",
+        ]
+        try:
+            reader = NfoReader(file_path)
+            for xpath in xpaths:
+                doubanid = LibraryScraperFix._valid_doubanid(
+                    reader.get_element_value(xpath)
+                )
+                if doubanid:
+                    return doubanid
+        except Exception as err:
+            logger.warning(f"从 NFO 读取豆瓣 ID 失败：{file_path} - {err}")
+        return None
+
+    @staticmethod
     def _valid_tmdbid(value: Any) -> Optional[int]:
         if value is None or isinstance(value, bool):
             return None
@@ -1128,6 +1209,15 @@ class LibraryScraperFix(_PluginBase):
         except (TypeError, ValueError):
             return None
         return tmdbid if tmdbid > 0 else None
+
+    @staticmethod
+    def _valid_doubanid(value: Any) -> Optional[str]:
+        if value is None or isinstance(value, bool):
+            return None
+        doubanid = str(value).strip()
+        if not doubanid.isdigit() or int(doubanid) <= 0:
+            return None
+        return doubanid
 
     def _parse_scraper_roots(
         self, summary: Dict[str, Any]

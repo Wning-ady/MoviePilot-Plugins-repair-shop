@@ -4,13 +4,14 @@
 
 ## 媒体库刮削(魔改版)
 
-插件 ID：`LibraryScraperFix`，当前版本：`1.1.0`。
+插件 ID：`LibraryScraperFix`，当前版本：`1.1.1`。
 
 本插件基于官方 [LibraryScraper 2.1.3](https://github.com/jxxghp/MoviePilot-Plugins/tree/main/plugins.v2/libraryscraper)，使用独立插件 ID，不覆盖官方插件。主要改进：
 
 - “仅补齐缺失元数据”独立于 MoviePilot 全局覆盖策略，同时保留全局禁用项。
 - 主扫描与目录识别失败后的回退扫描使用相同的排除路径和强制媒体类型规则。
 - 损坏、空白或缺少 ID 的 NFO 不再覆盖文件名中已解析出的有效 TMDB ID。
+- 支持从文件名及电影/TV 剧集级 NFO 读取豆瓣 ID，并按 MoviePilot 识别源设置选择豆瓣或 TMDB。
 - 只扫描真实媒体文件；符号链接、未知媒体类型和越界路径不会进入刮削链。
 - 使用集合去重和目录级组合指纹，成功且未变化的目标在每日任务中直接跳过。
 - 增加预演、单次上限、目标间隔、异常重试、周期完整复核、任务进度和运行摘要。

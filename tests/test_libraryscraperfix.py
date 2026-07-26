@@ -6,6 +6,7 @@ import tempfile
 import threading
 import types
 import unittest
+from contextlib import nullcontext
 from datetime import datetime, timezone
 from enum import Enum
 from pathlib import Path
@@ -50,6 +51,7 @@ class _MetaInfoPath:
         else:
             self.type = _MediaType.MOVIE
         self.tmdbid = None
+        self.doubanid = None
 
 
 class _NfoReader:
@@ -156,6 +158,7 @@ settings = types.SimpleNamespace(
     TV_RENAME_FORMAT="{{title}}/Season {{season}}/{{name}}",
     MOVIE_RENAME_FORMAT="{{title}}/{{name}}",
     SCRAP_FOLLOW_TMDB=True,
+    RECOGNIZE_SOURCE="themoviedb",
 )
 
 _module("app.chain.media", MediaChain=_MediaChain, scraping_lock=threading.Lock())
@@ -339,6 +342,30 @@ class LibraryScraperFixTests(unittest.TestCase):
             self.assertEqual(target.file_count, 2)
             self.assertEqual(target.total_size, 8)
 
+    def test_discovery_carries_douban_id_to_directory_target(self):
+        class DoubanMeta:
+            def __init__(self, _path):
+                self.type = _MediaType.MOVIE
+                self.tmdbid = None
+                self.doubanid = "1295644"
+
+        plugin = self.plugin()
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / _MediaType.MOVIE.value
+            media_dir = root / "Movie (1994)"
+            media_dir.mkdir(parents=True)
+            (media_dir / "Movie.mkv").touch()
+            plugin._scraper_paths = str(root)
+            summary = plugin._new_summary(plugin._now())
+
+            with mock.patch.object(PLUGIN, "MetaInfoPath", DoubanMeta):
+                targets = plugin._discover_targets([], summary, threading.Event())
+
+            target = next(iter(targets.values()))
+            self.assertEqual(target.path, plugin._normalize_path(media_dir))
+            self.assertEqual(target.doubanid, "1295644")
+            self.assertEqual(target.fingerprint[-1], "1295644")
+
     def test_unknown_media_type_is_blocked(self):
         plugin = self.plugin()
         with tempfile.TemporaryDirectory() as tmp:
@@ -388,6 +415,48 @@ class LibraryScraperFixTests(unittest.TestCase):
                 )
 
             self.assertEqual(result, 456)
+
+    def test_valid_nfo_douban_id_overrides_filename_douban_id(self):
+        class Reader:
+            def __init__(self, _path):
+                pass
+
+            def get_element_value(self, xpath):
+                return "1295644" if xpath == "uniqueid[@type='douban']" else None
+
+        plugin = self.plugin()
+        with tempfile.TemporaryDirectory() as tmp:
+            media = Path(tmp) / "Movie.mkv"
+            media.touch()
+            media.with_suffix(".nfo").touch()
+
+            with mock.patch.object(PLUGIN, "NfoReader", Reader):
+                result = plugin._doubanid_for_target(
+                    media, _MediaType.MOVIE, plugin._target_file, "27060077"
+                )
+
+            self.assertEqual(result, "1295644")
+
+    def test_invalid_nfo_douban_id_preserves_filename_douban_id(self):
+        class Reader:
+            def __init__(self, _path):
+                pass
+
+            def get_element_value(self, xpath):
+                return "not-an-id" if xpath == "doubanid" else None
+
+        plugin = self.plugin()
+        with tempfile.TemporaryDirectory() as tmp:
+            media = Path(tmp) / "Movie.mkv"
+            media.touch()
+            media.with_suffix(".nfo").touch()
+
+            with mock.patch.object(PLUGIN, "NfoReader", Reader):
+                result = plugin._doubanid_for_target(
+                    media, _MediaType.MOVIE, plugin._target_file, "1295644"
+                )
+
+            self.assertEqual(result, "1295644")
 
     def test_tv_file_uses_nearest_tvshow_nfo_not_episode_nfo(self):
         class Reader:
@@ -439,6 +508,99 @@ class LibraryScraperFixTests(unittest.TestCase):
                 )
 
             self.assertEqual(result, 456)
+
+    def test_tv_file_uses_nearest_tvshow_nfo_douban_id(self):
+        class Reader:
+            def __init__(self, path):
+                self.path = Path(path)
+
+            def get_element_value(self, xpath):
+                if xpath != "doubanid":
+                    return None
+                return "30181230" if self.path.name == "tvshow.nfo" else "99999999"
+
+        plugin = self.plugin()
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "Show (2026)"
+            season = root / "Season 1"
+            season.mkdir(parents=True)
+            media = season / "Show.S01E01.mkv"
+            media.touch()
+            media.with_suffix(".nfo").touch()
+            (root / "tvshow.nfo").touch()
+
+            with mock.patch.object(PLUGIN, "NfoReader", Reader):
+                result = plugin._doubanid_for_target(
+                    media, _MediaType.TV, plugin._target_file, None, root
+                )
+
+            self.assertEqual(result, "30181230")
+
+    def test_scrape_one_uses_douban_id_when_douban_is_recognition_source(self):
+        plugin = self.plugin()
+        plugin.chain = mock.Mock()
+        plugin.chain.recognize_media.return_value = types.SimpleNamespace(
+            tmdb_id=None, type=_MediaType.MOVIE, title="The Shawshank Redemption"
+        )
+        metadata_chain = mock.Mock()
+
+        with tempfile.TemporaryDirectory() as tmp:
+            media = Path(tmp) / "Movie.mkv"
+            media.touch()
+            with mock.patch.object(settings, "RECOGNIZE_SOURCE", "douban"), mock.patch.object(
+                plugin, "_repair_nfo_target"
+            ), mock.patch.object(
+                plugin, "_metadata_chain", return_value=nullcontext(metadata_chain)
+            ):
+                result = plugin._scrape_one(
+                    media,
+                    _MediaType.MOVIE,
+                    plugin._target_file,
+                    278,
+                    threading.Event(),
+                    None,
+                    "1295644",
+                )
+
+        self.assertTrue(result)
+        call = plugin.chain.recognize_media.call_args
+        self.assertEqual(call.kwargs["doubanid"], "1295644")
+        self.assertEqual(call.kwargs["mtype"], _MediaType.MOVIE)
+        self.assertNotIn("meta", call.kwargs)
+        self.assertEqual(
+            plugin.chain.recognize_media.return_value.scrape_source, "douban"
+        )
+
+    def test_scrape_one_keeps_tmdb_priority_for_tmdb_source(self):
+        plugin = self.plugin()
+        plugin.chain = mock.Mock()
+        plugin.chain.recognize_media.return_value = types.SimpleNamespace(
+            tmdb_id=278, type=_MediaType.MOVIE, title="The Shawshank Redemption"
+        )
+        metadata_chain = mock.Mock()
+
+        with tempfile.TemporaryDirectory() as tmp:
+            media = Path(tmp) / "Movie.mkv"
+            media.touch()
+            with mock.patch.object(
+                plugin, "_repair_nfo_target"
+            ), mock.patch.object(
+                plugin, "_metadata_chain", return_value=nullcontext(metadata_chain)
+            ):
+                result = plugin._scrape_one(
+                    media,
+                    _MediaType.MOVIE,
+                    plugin._target_file,
+                    278,
+                    threading.Event(),
+                    None,
+                    "1295644",
+                )
+
+        self.assertTrue(result)
+        plugin.chain.recognize_media.assert_called_once_with(
+            tmdbid=278, mtype=_MediaType.MOVIE
+        )
 
     def test_non_overwrite_policy_preserves_skip_but_disables_overwrite(self):
         overwrite = _Policy(is_skip=False, is_overwrite=True)
@@ -530,6 +692,7 @@ class LibraryScraperFixTests(unittest.TestCase):
             mtype=_MediaType.TV,
             target_type=plugin._target_file,
             source_root=Path("/media"),
+            doubanid="30181230",
         )
         cancel_event = threading.Event()
 
@@ -540,6 +703,7 @@ class LibraryScraperFixTests(unittest.TestCase):
         args = scrape.call_args.args
         self.assertIs(args[4], cancel_event)
         self.assertEqual(args[5], target.source_root)
+        self.assertEqual(args[6], target.doubanid)
 
     def test_stale_incremental_state_is_pruned_only_after_clean_scan(self):
         target = ScrapeTarget(

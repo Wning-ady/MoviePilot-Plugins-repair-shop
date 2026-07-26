@@ -16,11 +16,12 @@
     "name": "媒体库刮削(魔改版)",
     "description": "安全增量刮削媒体库，支持 NFO 空白概要与通用标题修复。",
     "labels": "媒体库,刮削",
-    "version": "1.1.0",
+    "version": "1.1.1",
     "icon": "https://raw.githubusercontent.com/Wning-ady/MoviePilot-Plugins-repair-shop/main/icons/Ombi_A.png",
     "author": "jxxghp,Wning-ady",
     "level": 1,
     "history": {
+      "v1.1.1": "新增豆瓣识别支持：贯通文件名与电影/剧集级 NFO 中的豆瓣 ID；遵循 MoviePilot 识别源设置，并保持 TMDB 默认优先",
       "v1.1.0": "新增安全 NFO 精细修复：仅补空白概要，且仅在 TMDB 有具体标题时替换“第 N 集”等通用标题；支持预演、内容指纹缓存与周期复核，不改文件名、图片、TMDB ID 或正常标题",
       "v1.0.2": "修复电视剧单文件刮削时取消事件与刮削根目录参数顺序错误导致的运行异常",
       "v1.0.1": "电视剧单文件刮削优先使用最近的 tvshow.nfo，避免误将单集 NFO 的 TMDB ID 当作剧集 ID 导致识别 404",

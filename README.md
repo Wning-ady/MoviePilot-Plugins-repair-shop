@@ -148,6 +148,15 @@ MoviePilot-Plugins-repair-shop/
 - 存在视频、未知文件或符号链接时不清理目录。
 - 清理不会删除监控根，也不会向监控根外递归。
 
+## 支持项目
+
+如果这些插件对你有帮助，欢迎扫码支持后续维护。
+
+<div align="center">
+  <img src="assets/support/wechat-pay.png" width="220" alt="微信收款码">
+  <img src="assets/support/alipay.png" width="220" alt="支付宝收款码">
+</div>
+
 ## 致谢与许可
 
 `RemoveLinkFix` 上游作者为 [DzAvril](https://github.com/DzAvril/MoviePilot-Plugins)，`LibraryScraperFix` 上游作者为 [jxxghp](https://github.com/jxxghp/MoviePilot-Plugins)。本仓库保留原项目 GPL-3.0 许可，修改内容同样以 GPL-3.0 发布。

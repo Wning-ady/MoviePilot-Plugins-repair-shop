@@ -266,6 +266,44 @@ class LibraryScraperFixTests(unittest.TestCase):
         self.assertTrue(defaults["dry_run"])
         self.assertFalse(defaults["enabled"])
 
+    def test_page_shows_recent_target_details_and_issues(self):
+        plugin = self.plugin()
+        summary = plugin._new_summary(plugin._now())
+        summary["finished_at"] = plugin._now()
+        target = ScrapeTarget(
+            path=Path("/media/Movie"),
+            mtype=_MediaType.MOVIE,
+            target_type=plugin._target_dir,
+            source_root=Path("/media"),
+            file_count=2,
+        )
+        plugin._apply_outcome(
+            summary, target, ScrapeOutcome(status="success", scraped_files=2)
+        )
+        plugin._apply_outcome(
+            summary,
+            ScrapeTarget(
+                path=Path("/media/Unknown"),
+                mtype=_MediaType.MOVIE,
+                target_type=plugin._target_dir,
+                source_root=Path("/media"),
+                file_count=1,
+            ),
+            ScrapeOutcome(status="unrecognized", unrecognized_files=1),
+        )
+        summary["failures"] = [{"path": "/media/broken", "detail": "读取失败"}]
+        plugin.get_data = lambda key: summary if key == plugin._last_run_key else None
+
+        page = plugin.get_page()
+
+        self.assertEqual(page[0]["component"], "VAlert")
+        self.assertEqual(page[1]["component"], "VExpansionPanels")
+        self.assertEqual(page[2]["component"], "VExpansionPanels")
+        detail_rows = page[1]["content"][0]["content"][1]["content"][0]["content"][1]["content"]
+        self.assertEqual(detail_rows[0]["content"][0]["text"], "成功")
+        self.assertEqual(detail_rows[1]["content"][0]["text"], "未识别")
+        self.assertEqual(detail_rows[1]["content"][3]["text"], "未识别到媒体信息")
+
     def test_path_parser_supports_forced_type_and_literal_hash(self):
         path, mtype = LibraryScraperFix._parse_scraper_line("/media/tv#电视剧")
         self.assertEqual(path, Path("/media/tv"))

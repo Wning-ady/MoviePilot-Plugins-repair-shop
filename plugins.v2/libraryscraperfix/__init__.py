@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import os
 import re
+import stat as stat_module
 import threading
 import time
 import traceback
@@ -54,6 +55,7 @@ class ScrapeTarget:
     total_size: int = 0
     max_mtime_ns: int = 0
     signature: int = 0
+    media_files: List[Path] = field(default_factory=list)
 
     @property
     def key(self) -> str:
@@ -88,6 +90,7 @@ class ScrapeTarget:
             digest_size=8,
         )
         self.signature ^= int.from_bytes(token.digest(), byteorder="big")
+        self.media_files.append(file_path)
         if not self.tmdbid and tmdbid:
             self.tmdbid = tmdbid
         if not self.doubanid and doubanid:
@@ -138,7 +141,7 @@ class LibraryScraperFix(_PluginBase):
         "https://raw.githubusercontent.com/Wning-ady/"
         "MoviePilot-Plugins-repair-shop/main/icons/Ombi_A.png"
     )
-    plugin_version = "1.1.3"
+    plugin_version = "1.1.4"
     plugin_author = "jxxghp,Wning-ady"
     author_url = "https://github.com/Wning-ady/MoviePilot-Plugins-repair-shop"
     plugin_config_prefix = "libraryscraperfix_"
@@ -413,9 +416,17 @@ class LibraryScraperFix(_PluginBase):
                 alert_type = "info"
             else:
                 text = self._format_page_summary(last_run)
-                if last_run.get("failed"):
+                if (
+                    last_run.get("failed")
+                    or last_run.get("scan_errors")
+                    or last_run.get("invalid_paths")
+                ):
                     alert_type = "error"
-                elif last_run.get("partial"):
+                elif (
+                    last_run.get("partial")
+                    or last_run.get("unrecognized")
+                    or last_run.get("cancelled")
+                ):
                     alert_type = "warning"
                 else:
                     alert_type = "success"
@@ -607,7 +618,7 @@ class LibraryScraperFix(_PluginBase):
                 logger.info(f"刮削根目录在排除范围中，跳过：{root}")
                 continue
             logger.info(f"开始检索目录：{root} {forced_type or ''}")
-            for file_path in self._iter_media_files(
+            for file_path, stat_result in self._iter_media_file_entries(
                 root, exclusions, media_extensions, summary, cancel_event
             ):
                 summary["media_files"] += 1
@@ -634,7 +645,6 @@ class LibraryScraperFix(_PluginBase):
                         summary["scan_errors"] += 1
                         continue
                     target_path, target_type = item
-                    stat_result = file_path.stat()
                     key = f"{target_type}|{mtype.value}|{target_path}"
                     target = targets.get(key)
                     if not target:
@@ -648,7 +658,7 @@ class LibraryScraperFix(_PluginBase):
                             doubanid=doubanid,
                         )
                         targets[key] = target
-                        logger.info(f"发现刮削目标：{target_path}")
+                        logger.debug(f"发现刮削目标：{target_path}")
                     target.include_file(file_path, stat_result, tmdbid, doubanid)
                 except (FileNotFoundError, PermissionError, OSError) as err:
                     summary["scan_errors"] += 1
@@ -677,43 +687,62 @@ class LibraryScraperFix(_PluginBase):
         summary: Dict[str, Any],
         cancel_event: threading.Event,
     ) -> Iterable[Path]:
+        for file_path, _stat_result in self._iter_media_file_entries(
+            root, exclusions, media_extensions, summary, cancel_event
+        ):
+            yield file_path
+
+    def _iter_media_file_entries(
+        self,
+        root: Path,
+        exclusions: List[Path],
+        media_extensions: Iterable[str],
+        summary: Dict[str, Any],
+        cancel_event: threading.Event,
+    ) -> Iterable[Tuple[Path, os.stat_result]]:
         extensions = set(media_extensions)
 
         def on_error(err: OSError) -> None:
             summary["scan_errors"] += 1
             self._remember_failure(summary, str(getattr(err, "filename", root)), str(err))
 
-        for current, dirnames, filenames in os.walk(
-            root, topdown=True, onerror=on_error, followlinks=False
-        ):
+        pending = [root]
+        while pending:
             if cancel_event.is_set():
                 return
-            current_path = Path(current)
-            kept_dirs = []
-            for dirname in dirnames:
-                child_dir = current_path / dirname
-                if child_dir.is_symlink():
-                    summary["symlinks_skipped"] += 1
-                    logger.warning(f"跳过符号链接目录：{child_dir}")
-                    continue
-                if self._is_excluded(child_dir, exclusions):
-                    summary["excluded_dirs"] += 1
-                    continue
-                kept_dirs.append(dirname)
-            dirnames[:] = kept_dirs
+            current_path = pending.pop()
+            try:
+                with os.scandir(current_path) as scanner:
+                    entries = list(scanner)
+            except OSError as err:
+                on_error(err)
+                continue
 
-            for filename in filenames:
-                file_path = current_path / filename
-                if file_path.suffix.lower() not in extensions:
-                    continue
-                if file_path.is_symlink():
-                    summary["symlinks_skipped"] += 1
-                    logger.warning(f"跳过符号链接文件：{file_path}")
-                    continue
-                if self._is_excluded(file_path, exclusions):
-                    summary["excluded_files"] += 1
-                    continue
-                yield file_path
+            child_dirs = []
+            for entry in entries:
+                entry_path = Path(entry.path)
+                try:
+                    if entry.is_symlink():
+                        summary["symlinks_skipped"] += 1
+                        logger.warning(f"跳过符号链接：{entry_path}")
+                        continue
+                    if entry.is_dir(follow_symlinks=False):
+                        if self._is_excluded(entry_path, exclusions):
+                            summary["excluded_dirs"] += 1
+                            continue
+                        child_dirs.append(entry_path)
+                        continue
+                    if entry_path.suffix.lower() not in extensions:
+                        continue
+                    if self._is_excluded(entry_path, exclusions):
+                        summary["excluded_files"] += 1
+                        continue
+                    if not entry.is_file(follow_symlinks=False):
+                        continue
+                    yield entry_path, entry.stat(follow_symlinks=False)
+                except OSError as err:
+                    on_error(err)
+            pending.extend(reversed(child_dirs))
 
     def _run_target_with_retry(
         self,
@@ -956,9 +985,13 @@ class LibraryScraperFix(_PluginBase):
 
     def _repair_episode_nfo(self, path: Path, mediainfo: Any) -> None:
         nfo_path = path.with_suffix(".nfo")
-        if not nfo_path.exists() or nfo_path.is_symlink():
+        try:
+            stat_result = nfo_path.lstat()
+        except OSError:
             return
-        if not self._nfo_path_due(nfo_path):
+        if stat_module.S_ISLNK(stat_result.st_mode):
+            return
+        if not self._nfo_path_due(nfo_path, stat_result):
             summary = getattr(self, "_active_summary", None)
             if summary is not None:
                 summary["nfo_cached"] += 1
@@ -1078,31 +1111,53 @@ class LibraryScraperFix(_PluginBase):
             return False
         nfo_paths = [target.path.with_suffix(".nfo")]
         if target.target_type == self._target_dir:
-            nfo_paths = [
-                item.with_suffix(".nfo")
-                for item in target.path.rglob("*")
-                if item.is_file()
-                and not item.is_symlink()
-                and item.suffix.lower() in {str(ext).lower() for ext in settings.RMT_MEDIAEXT}
-            ]
+            media_files = target.media_files
+            if not media_files:
+                media_files = [
+                    item
+                    for item in target.path.rglob("*")
+                    if item.is_file()
+                    and not item.is_symlink()
+                    and item.suffix.lower()
+                    in {str(ext).lower() for ext in settings.RMT_MEDIAEXT}
+                ]
+            nfo_paths = [item.with_suffix(".nfo") for item in media_files]
         if not nfo_paths:
             return False
-        state = getattr(self, "_nfo_repair_state", {})
+        cached = 0
         for nfo_path in nfo_paths:
-            if not nfo_path.exists() or nfo_path.is_symlink():
+            try:
+                stat_result = nfo_path.lstat()
+            except FileNotFoundError:
                 continue
-            if self._nfo_path_due(nfo_path):
+            except OSError:
                 return True
+            if stat_module.S_ISLNK(stat_result.st_mode):
+                continue
+            if self._nfo_path_due(nfo_path, stat_result):
+                return True
+            cached += 1
+        summary = getattr(self, "_active_summary", None)
+        if summary is not None:
+            summary["nfo_cached"] += cached
         return False
 
-    def _nfo_path_due(self, nfo_path: Path) -> bool:
+    def _nfo_path_due(
+        self, nfo_path: Path, stat_result: Optional[os.stat_result] = None
+    ) -> bool:
         state = getattr(self, "_nfo_repair_state", {})
         try:
             entry = state.get(str(nfo_path))
-            fingerprint = self._nfo_fingerprint(nfo_path)
+            metadata = self._nfo_stat_fingerprint(
+                stat_result if stat_result is not None else nfo_path.stat()
+            )
         except OSError:
             return True
-        if not entry or entry.get("fingerprint") != fingerprint:
+        fingerprint = entry.get("fingerprint") if isinstance(entry, dict) else None
+        if not isinstance(fingerprint, list):
+            return True
+        metadata_length = 3 if len(fingerprint) >= 4 else 2
+        if fingerprint[:metadata_length] != metadata[:metadata_length]:
             return True
         if self._nfo_audit_days:
             try:
@@ -1113,11 +1168,28 @@ class LibraryScraperFix(_PluginBase):
         return False
 
     @staticmethod
-    def _nfo_fingerprint(nfo_path: Path) -> List[Any]:
+    def _nfo_stat_fingerprint(stat_result: os.stat_result) -> List[int]:
+        mtime_ns = int(
+            getattr(
+                stat_result,
+                "st_mtime_ns",
+                stat_result.st_mtime * 1_000_000_000,
+            )
+        )
+        ctime_ns = int(
+            getattr(
+                stat_result,
+                "st_ctime_ns",
+                stat_result.st_ctime * 1_000_000_000,
+            )
+        )
+        return [int(stat_result.st_size), mtime_ns, ctime_ns]
+
+    @classmethod
+    def _nfo_fingerprint(cls, nfo_path: Path) -> List[Any]:
         stat_result = nfo_path.stat()
-        mtime_ns = int(getattr(stat_result, "st_mtime_ns", stat_result.st_mtime * 1_000_000_000))
         digest = hashlib.blake2b(nfo_path.read_bytes(), digest_size=8).hexdigest()
-        return [int(stat_result.st_size), mtime_ns, digest]
+        return [*cls._nfo_stat_fingerprint(stat_result), digest]
 
     def _remember_nfo_repair_state(self, nfo_path: Path, status: str) -> None:
         state = getattr(self, "_nfo_repair_state", None)
@@ -1356,7 +1428,10 @@ class LibraryScraperFix(_PluginBase):
 
     @classmethod
     def _is_excluded(cls, path: Path, exclusions: List[Path]) -> bool:
-        normalized = cls._normalize_path(path)
+        if not exclusions:
+            return False
+        # Scanner roots and exclusions are already real paths; scanned symlinks are pruned.
+        normalized = Path(os.path.abspath(str(path)))
         return any(normalized == item or cls._is_within(normalized, item) for item in exclusions)
 
     @staticmethod
@@ -1607,10 +1682,13 @@ class LibraryScraperFix(_PluginBase):
             grouped.setdefault(item.get("status", ""), []).append(item)
 
         panels = []
+        open_panels = []
         for status in ("failed", "unrecognized", "partial", "success", "dry_run", "deferred", "cancelled"):
             items = grouped.pop(status, [])
             if not items:
                 continue
+            if status in ("failed", "unrecognized", "partial", "cancelled"):
+                open_panels.append(len(panels))
             rows = [
                 {
                     "component": "tr",
@@ -1665,7 +1743,11 @@ class LibraryScraperFix(_PluginBase):
             )
         return {
             "component": "VExpansionPanels",
-            "props": {"variant": "accordion", "multiple": True},
+            "props": {
+                "variant": "accordion",
+                "multiple": True,
+                "modelValue": [0] if open_panels else [],
+            },
             "content": [
                 {
                     "component": "VExpansionPanel",
@@ -1679,7 +1761,11 @@ class LibraryScraperFix(_PluginBase):
                             "content": [
                                 {
                                     "component": "VExpansionPanels",
-                                    "props": {"variant": "accordion", "multiple": True},
+                                    "props": {
+                                        "variant": "accordion",
+                                        "multiple": True,
+                                        "modelValue": open_panels,
+                                    },
                                     "content": panels,
                                 }
                             ],
@@ -1950,7 +2036,7 @@ class LibraryScraperFix(_PluginBase):
         ]
         if summary.get("cancelled"):
             lines.append("状态：已取消")
-        if summary.get("nfo_checked"):
+        if summary.get("nfo_checked") or summary.get("nfo_cached"):
             lines.append(
                 "NFO 字段：检查 %s，缓存跳过 %s，预演 %s，已修复 %s（标题 %s，概要 %s）"
                 % (
@@ -1984,7 +2070,7 @@ class LibraryScraperFix(_PluginBase):
             + (
                 f"\nNFO：检查 {summary.get('nfo_checked', 0)}，缓存跳过 "
                 f"{summary.get('nfo_cached', 0)}，修复 {summary.get('nfo_updated', 0)}"
-                if summary.get("nfo_checked")
+                if summary.get("nfo_checked") or summary.get("nfo_cached")
                 else ""
             )
         )

@@ -301,9 +301,13 @@ class LibraryScraperFixTests(unittest.TestCase):
         page = plugin.get_page()
 
         self.assertEqual(page[0]["component"], "VAlert")
+        self.assertEqual(page[0]["props"]["type"], "warning")
         self.assertEqual(page[1]["component"], "VExpansionPanels")
         self.assertEqual(page[2]["component"], "VExpansionPanels")
+        self.assertEqual(page[1]["props"]["modelValue"], [0])
         groups = page[1]["content"][0]["content"][1]["content"][0]["content"]
+        inner_props = page[1]["content"][0]["content"][1]["content"][0]["props"]
+        self.assertEqual(inner_props["modelValue"], [0])
         self.assertEqual(groups[0]["content"][0]["text"], "未识别（1 条）")
         self.assertEqual(groups[1]["content"][0]["text"], "成功（1 条）")
         unrecognized_rows = groups[0]["content"][1]["content"][0]["content"][1]["content"]
@@ -313,6 +317,33 @@ class LibraryScraperFixTests(unittest.TestCase):
         headers = groups[0]["content"][1]["content"][0]["content"][0]["content"]
         self.assertEqual(headers[2]["text"], "耗时")
         self.assertIn("扫描：12.3 秒，处理：4.5 秒", page[0]["props"]["text"])
+
+    def test_success_only_details_stay_collapsed(self):
+        panel = self.plugin()._details_panel(
+            [
+                {
+                    "status": "success",
+                    "path": "/media/Movie",
+                    "files": 1,
+                    "duration_seconds": 1.0,
+                    "detail": "",
+                }
+            ]
+        )
+
+        self.assertEqual(panel["props"]["modelValue"], [])
+        inner_props = panel["content"][0]["content"][1]["content"][0]["props"]
+        self.assertEqual(inner_props["modelValue"], [])
+
+    def test_scan_error_uses_error_alert(self):
+        plugin = self.plugin()
+        summary = plugin._new_summary(plugin._now())
+        summary["scan_errors"] = 1
+        plugin.get_data = lambda key: summary if key == plugin._last_run_key else None
+
+        page = plugin.get_page()
+
+        self.assertEqual(page[0]["props"]["type"], "error")
 
     def test_path_parser_supports_forced_type_and_literal_hash(self):
         path, mtype = LibraryScraperFix._parse_scraper_line("/media/tv#电视剧")
@@ -351,9 +382,10 @@ class LibraryScraperFixTests(unittest.TestCase):
             (root / "linked-dir").symlink_to(outside, target_is_directory=True)
 
             counters = plugin._new_scan_counters()
+            scan_root = plugin._normalize_path(root)
             files = list(
                 plugin._iter_media_files(
-                    root,
+                    scan_root,
                     [plugin._normalize_path(excluded)],
                     {".mkv"},
                     counters,
@@ -361,9 +393,46 @@ class LibraryScraperFixTests(unittest.TestCase):
                 )
             )
 
-            self.assertEqual(files, [allowed / "movie.mkv"])
+            self.assertEqual(files, [scan_root / "allowed" / "movie.mkv"])
             self.assertEqual(counters["excluded_dirs"], 1)
             self.assertEqual(counters["symlinks_skipped"], 1)
+
+    def test_empty_exclusions_skip_path_normalization(self):
+        plugin = self.plugin()
+        with mock.patch.object(
+            plugin, "_normalize_path", side_effect=AssertionError("unexpected realpath")
+        ):
+            self.assertFalse(plugin._is_excluded(Path("/media/Movie.mkv"), []))
+            self.assertTrue(
+                plugin._is_excluded(
+                    Path("/media/skip/Movie.mkv"), [Path("/media/skip")]
+                )
+            )
+
+    def test_discovery_reuses_stat_from_directory_entry(self):
+        plugin = self.plugin()
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / _MediaType.MOVIE.value
+            root.mkdir()
+            media = root / "Movie.mkv"
+            media.touch()
+            plugin._scraper_paths = f"{root}#电影"
+            media = plugin._normalize_path(media)
+            summary = plugin._new_summary(plugin._now())
+            entry_stat = types.SimpleNamespace(
+                st_size=37, st_mtime=1.0, st_mtime_ns=1_000_000_000
+            )
+
+            with mock.patch.object(
+                plugin,
+                "_iter_media_file_entries",
+                return_value=iter([(media, entry_stat)]),
+            ):
+                targets = plugin._discover_targets([], summary, threading.Event())
+
+            target = next(iter(targets.values()))
+            self.assertEqual(target.total_size, 37)
+            self.assertEqual(target.media_files, [media])
 
     def test_discovery_deduplicates_and_aggregates_directory_fingerprint(self):
         plugin = self.plugin()
@@ -1063,6 +1132,77 @@ class LibraryScraperFixTests(unittest.TestCase):
             plugin._nfo_audit_days = 1
             plugin._nfo_repair_state[str(nfo)]["updated_at"] = "2000-01-01T00:00:00+00:00"
             self.assertTrue(plugin._nfo_repair_due(target))
+
+    def test_nfo_cache_hit_does_not_read_file_body(self):
+        plugin = self.plugin()
+        plugin._repair_nfo_enabled = True
+        plugin._dry_run = False
+        with tempfile.TemporaryDirectory() as tmp:
+            media = Path(tmp) / "Show.S01E15.mkv"
+            media.touch()
+            nfo = media.with_suffix(".nfo")
+            nfo.write_text("<episodedetails />", encoding="utf-8")
+            plugin._remember_nfo_repair_state(nfo, "checked")
+
+            with mock.patch.object(
+                Path, "read_bytes", side_effect=AssertionError("unexpected NFO read")
+            ):
+                self.assertFalse(plugin._nfo_path_due(nfo))
+
+    def test_nfo_cache_detects_ctime_change_with_same_size_and_mtime(self):
+        plugin = self.plugin()
+        nfo = Path("/media/Show.S01E15.nfo")
+        plugin._nfo_repair_state = {
+            str(nfo): {
+                "fingerprint": [20, 100, 200, "digest"],
+                "updated_at": plugin._now(),
+            }
+        }
+        changed_stat = types.SimpleNamespace(
+            st_size=20,
+            st_mtime=0.0000001,
+            st_mtime_ns=100,
+            st_ctime=0.000000201,
+            st_ctime_ns=201,
+        )
+
+        self.assertTrue(plugin._nfo_path_due(nfo, changed_stat))
+
+    def test_nfo_cache_only_run_is_visible_in_summary(self):
+        plugin = self.plugin()
+        summary = plugin._new_summary(plugin._now())
+        summary["nfo_cached"] = 8424
+
+        self.assertIn("缓存跳过 8424", plugin._format_notification(summary))
+        self.assertIn("缓存跳过 8424", plugin._format_page_summary(summary))
+
+    def test_nfo_due_reuses_discovered_media_paths_and_counts_cache_hit(self):
+        plugin = self.plugin()
+        plugin._repair_nfo_enabled = True
+        plugin._dry_run = False
+        plugin._active_summary = plugin._new_summary(plugin._now())
+        with tempfile.TemporaryDirectory() as tmp:
+            directory = Path(tmp) / "Show"
+            directory.mkdir()
+            media = directory / "Show.S01E15.mkv"
+            media.touch()
+            nfo = media.with_suffix(".nfo")
+            nfo.write_text("<episodedetails />", encoding="utf-8")
+            plugin._remember_nfo_repair_state(nfo, "checked")
+            target = ScrapeTarget(
+                path=directory,
+                mtype=_MediaType.TV,
+                target_type=plugin._target_dir,
+                source_root=Path(tmp),
+                media_files=[media],
+            )
+
+            with mock.patch.object(
+                Path, "rglob", side_effect=AssertionError("unexpected NFO rescan")
+            ):
+                self.assertFalse(plugin._nfo_repair_due(target))
+
+        self.assertEqual(plugin._active_summary["nfo_cached"], 1)
 
     def test_nfo_cache_skip_is_counted_in_summary(self):
         plugin = self.plugin()

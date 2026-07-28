@@ -249,12 +249,18 @@ class LibraryScraperFixTests(unittest.TestCase):
     def test_form_defaults_cover_every_config_model(self):
         form, defaults = self.plugin().get_form()
         models = set()
+        texts = []
+        hinted_models = set()
 
         def visit(value):
             if isinstance(value, dict):
+                if value.get("text"):
+                    texts.append(value["text"])
                 model = value.get("props", {}).get("model")
                 if model:
                     models.add(model)
+                    if value.get("props", {}).get("hint"):
+                        hinted_models.add(model)
                 for item in value.values():
                     visit(item)
             elif isinstance(value, list):
@@ -265,6 +271,15 @@ class LibraryScraperFixTests(unittest.TestCase):
         self.assertEqual(models, set(defaults))
         self.assertTrue(defaults["dry_run"])
         self.assertFalse(defaults["enabled"])
+        for title in (
+            "1. 运行与通知",
+            "2. 扫描范围",
+            "3. 刮削与增量策略",
+            "4. NFO 字段修复",
+            "5. 一次性维护",
+        ):
+            self.assertIn(title, texts)
+        self.assertEqual(hinted_models, set(defaults))
 
     def test_page_shows_recent_target_details_and_issues(self):
         plugin = self.plugin()
@@ -302,21 +317,28 @@ class LibraryScraperFixTests(unittest.TestCase):
 
         self.assertEqual(page[0]["component"], "VAlert")
         self.assertEqual(page[0]["props"]["type"], "warning")
-        self.assertEqual(page[1]["component"], "VExpansionPanels")
-        self.assertEqual(page[2]["component"], "VExpansionPanels")
-        self.assertEqual(page[1]["props"]["modelValue"], [0])
-        groups = page[1]["content"][0]["content"][1]["content"][0]["content"]
-        inner_props = page[1]["content"][0]["content"][1]["content"][0]["props"]
-        self.assertEqual(inner_props["modelValue"], [0])
-        self.assertEqual(groups[0]["content"][0]["text"], "未识别（1 条）")
-        self.assertEqual(groups[1]["content"][0]["text"], "成功（1 条）")
-        unrecognized_rows = groups[0]["content"][1]["content"][0]["content"][1]["content"]
-        success_rows = groups[1]["content"][1]["content"][0]["content"][1]["content"]
-        self.assertEqual(unrecognized_rows[0]["content"][3]["text"], "未识别到媒体信息")
-        self.assertEqual(success_rows[0]["content"][2]["text"], "1.2 秒")
-        headers = groups[0]["content"][1]["content"][0]["content"][0]["content"]
-        self.assertEqual(headers[2]["text"], "耗时")
-        self.assertIn("扫描：12.3 秒，处理：4.5 秒", page[0]["props"]["text"])
+        self.assertIn("1 项需要处理", page[0]["props"]["title"])
+        self.assertEqual(page[1]["component"], "VSheet")
+        self.assertEqual(page[1]["content"][0]["text"], "需要处理（2 条记录）")
+        issue_panels = page[1]["content"][1]
+        self.assertEqual(issue_panels["props"]["modelValue"], [0, 1])
+        self.assertEqual(
+            issue_panels["content"][0]["content"][0]["text"], "失败（1 条）"
+        )
+        self.assertEqual(
+            issue_panels["content"][1]["content"][0]["text"], "未识别（1 条）"
+        )
+        self.assertEqual(page[2]["component"], "VRow")
+        cards = page[2]["content"]
+        self.assertEqual(cards[0]["content"][0]["content"][0]["text"], "扫描范围")
+        self.assertEqual(cards[1]["content"][0]["content"][0]["text"], "本轮分流")
+        self.assertEqual(page[3]["content"][0]["text"], "缓存与实际处理")
+        self.assertEqual(
+            page[4]["content"][0]["text"], "为什么这些目标需要处理"
+        )
+        self.assertIn("扫描媒体库", page[5]["props"]["title"])
+        self.assertEqual(len(summary["details"]), 2)
+        self.assertEqual(len(summary["issues"]), 1)
 
     def test_success_only_details_stay_collapsed(self):
         panel = self.plugin()._details_panel(
@@ -331,9 +353,35 @@ class LibraryScraperFixTests(unittest.TestCase):
             ]
         )
 
-        self.assertEqual(panel["props"]["modelValue"], [])
-        inner_props = panel["content"][0]["content"][1]["content"][0]["props"]
-        self.assertEqual(inner_props["modelValue"], [])
+        self.assertEqual(panel["component"], "VSheet")
+        self.assertEqual(panel["content"][0]["text"], "目标结果（1 个）")
+        self.assertEqual(panel["content"][1]["props"]["modelValue"], [])
+
+    def test_old_run_detail_is_split_into_target_and_specific_issue(self):
+        summary = {
+            "details": [
+                {
+                    "status": "unrecognized",
+                    "path": "/media/Show",
+                    "detail": "未识别到媒体信息",
+                },
+                {
+                    "status": "unrecognized",
+                    "path": "/media/Show/Season 1/Show.S01E01.mkv",
+                    "detail": "未识别到媒体信息",
+                },
+            ],
+            "failures": [],
+        }
+
+        targets = LibraryScraperFix._target_detail_items(summary)
+        issues = LibraryScraperFix._issue_items(summary)
+
+        self.assertEqual([item["path"] for item in targets], ["/media/Show"])
+        self.assertEqual(
+            [item["path"] for item in issues],
+            ["/media/Show/Season 1/Show.S01E01.mkv"],
+        )
 
     def test_scan_error_uses_error_alert(self):
         plugin = self.plugin()
@@ -864,9 +912,54 @@ class LibraryScraperFixTests(unittest.TestCase):
                 ],
             ),
         )
+        self.assertEqual(len(summary["details"]), plugin._detail_limit)
         self.assertTrue(
-            any(item["path"] == "/media/Movie.broken.mkv" for item in summary["details"])
+            any(item["path"] == "/media/Movie.broken.mkv" for item in summary["issues"])
         )
+
+    def test_candidate_reason_explains_why_target_is_processed(self):
+        plugin = self.plugin()
+        target = ScrapeTarget(
+            path=Path("/media/Movie"),
+            mtype=_MediaType.MOVIE,
+            target_type=plugin._target_dir,
+            source_root=Path("/media"),
+            file_count=1,
+        )
+
+        self.assertEqual(
+            plugin._candidate_reason(target, {}, False, False), "new"
+        )
+        state = {
+            target.key: {
+                "status": "success",
+                "mode": plugin._mode,
+                "fingerprint": target.fingerprint,
+            }
+        }
+        self.assertEqual(
+            plugin._candidate_reason(target, state, False, False), "periodic"
+        )
+        self.assertEqual(
+            plugin._candidate_reason(target, state, True, True), "nfo"
+        )
+        state[target.key]["fingerprint"] = []
+        self.assertEqual(
+            plugin._candidate_reason(target, state, False, False), "changed"
+        )
+        state[target.key]["status"] = "failed"
+        self.assertEqual(
+            plugin._candidate_reason(target, state, False, False), "retry"
+        )
+        plugin._force_full_scan = True
+        self.assertEqual(
+            plugin._candidate_reason(target, state, False, False), "forced"
+        )
+        summary = plugin._new_summary(plugin._now())
+        summary["eligible_new"] = 2
+        summary["eligible_retry"] = 1
+        notification = plugin._format_notification(summary)
+        self.assertIn("待处理原因：新增 2，上次未完成 1", notification)
 
     def test_scrape_target_passes_cancel_event_before_source_root(self):
         plugin = self.plugin()

@@ -141,7 +141,7 @@ class LibraryScraperFix(_PluginBase):
         "https://raw.githubusercontent.com/Wning-ady/"
         "MoviePilot-Plugins-repair-shop/main/icons/Ombi_A.png"
     )
-    plugin_version = "1.1.4"
+    plugin_version = "1.1.5"
     plugin_author = "jxxghp,Wning-ady"
     author_url = "https://github.com/Wning-ady/MoviePilot-Plugins-repair-shop"
     plugin_config_prefix = "libraryscraperfix_"
@@ -272,48 +272,28 @@ class LibraryScraperFix(_PluginBase):
         ]
 
     def get_form(self) -> Tuple[List[dict], Dict[str, Any]]:
-        return [
-            {
-                "component": "VForm",
-                "content": [
+        sections = [
+            self._form_section(
+                "1. 运行与通知",
+                "控制定时任务、单次执行和结果通知。",
+                [
                     {
                         "component": "VRow",
                         "content": [
-                            self._switch("enabled", "启用插件"),
-                            self._switch("onlyonce", "立即运行一次"),
-                            self._switch("dry_run", "预演模式"),
-                            self._switch("incremental", "增量扫描"),
-                            self._switch("force_full_scan", "下次忽略增量缓存"),
-                            self._switch("notify", "发送运行摘要"),
-                            self._switch("repair_nfo_fields", "修复空白概要和通用标题"),
+                            self._switch(
+                                "enabled", "启用定时任务", "按执行周期自动运行。"
+                            ),
+                            self._switch(
+                                "onlyonce", "保存后运行一次", "触发后自动复位。"
+                            ),
+                            self._switch(
+                                "notify", "发送运行摘要", "完成后发送数量、耗时和问题统计。"
+                            ),
                         ],
                     },
                     {
                         "component": "VRow",
                         "content": [
-                            {
-                                "component": "VCol",
-                                "props": {"cols": 12, "md": 6},
-                                "content": [
-                                    {
-                                        "component": "VSelect",
-                                        "props": {
-                                            "model": "mode",
-                                            "label": "覆盖模式",
-                                            "items": [
-                                                {
-                                                    "title": "仅补齐缺失元数据",
-                                                    "value": "",
-                                                },
-                                                {
-                                                    "title": "覆盖未被全局禁用的元数据",
-                                                    "value": "force_all",
-                                                },
-                                            ],
-                                        },
-                                    }
-                                ],
-                            },
                             {
                                 "component": "VCol",
                                 "props": {"cols": 12, "md": 6},
@@ -323,23 +303,21 @@ class LibraryScraperFix(_PluginBase):
                                         "props": {
                                             "model": "cron",
                                             "label": "执行周期",
-                                            "placeholder": "5 位 Cron 表达式",
+                                            "placeholder": "0 3 * * *",
+                                            "hint": "5 位 Cron，默认每天 03:00。",
+                                            "persistentHint": True,
                                         },
                                     }
                                 ],
-                            },
+                            }
                         ],
                     },
-                    {
-                        "component": "VRow",
-                        "content": [
-                            self._number_field("max_targets", "单次最多处理目标", 0, 100000),
-                            self._number_field("interval_seconds", "目标间隔（秒）", 0, 30, step=0.1),
-                            self._number_field("retry_count", "异常重试次数", 0, 3),
-                            self._number_field("full_scan_days", "完整复核间隔（天）", 0, 365),
-                            self._number_field("nfo_audit_days", "NFO 字段复核间隔（天）", 0, 365),
-                        ],
-                    },
+                ],
+            ),
+            self._form_section(
+                "2. 扫描范围",
+                "明确指定容器内媒体库路径和永久排除目录。",
+                [
                     {
                         "component": "VRow",
                         "content": [
@@ -353,16 +331,13 @@ class LibraryScraperFix(_PluginBase):
                                             "model": "scraper_paths",
                                             "label": "刮削路径",
                                             "rows": 6,
-                                            "placeholder": "每行一个绝对路径，可在末尾添加 #电影 或 #电视剧",
+                                            "placeholder": "/media/movies #电影\n/media/tv #电视剧",
+                                            "hint": "每行一个绝对路径；类型明确时可追加 #电影 或 #电视剧。",
+                                            "persistentHint": True,
                                         },
                                     }
                                 ],
-                            }
-                        ],
-                    },
-                    {
-                        "component": "VRow",
-                        "content": [
+                            },
                             {
                                 "component": "VCol",
                                 "props": {"cols": 12},
@@ -373,25 +348,164 @@ class LibraryScraperFix(_PluginBase):
                                             "model": "exclude_paths",
                                             "label": "排除路径",
                                             "rows": 3,
-                                            "placeholder": "每行一个绝对路径",
+                                            "placeholder": "/media/private",
+                                            "hint": "该路径及所有子目录不会进入扫描或回退刮削。",
+                                            "persistentHint": True,
                                         },
                                     }
                                 ],
-                            }
+                            },
+                        ],
+                    }
+                ],
+            ),
+            self._form_section(
+                "3. 刮削与增量策略",
+                "决定本轮是否写入、处理多少目标以及何时重新复核。",
+                [
+                    {
+                        "component": "VRow",
+                        "content": [
+                            self._switch(
+                                "dry_run", "预演模式", "扫描和识别，不写 NFO 或图片。"
+                            ),
+                            self._switch(
+                                "incremental", "启用目标缓存", "跳过近期成功且文件未变的目标。"
+                            ),
                         ],
                     },
                     {
                         "component": "VRow",
-                        "content": [self._switch("clear_cache", "清空增量缓存")],
+                        "content": [
+                            {
+                                "component": "VCol",
+                                "props": {"cols": 12, "md": 6},
+                                "content": [
+                                    {
+                                        "component": "VSelect",
+                                        "props": {
+                                            "model": "mode",
+                                            "label": "元数据写入策略",
+                                            "items": [
+                                                {
+                                                    "title": "仅补齐缺失元数据（推荐）",
+                                                    "value": "",
+                                                },
+                                                {
+                                                    "title": "覆盖未被全局禁用的元数据",
+                                                    "value": "force_all",
+                                                },
+                                            ],
+                                            "hint": "全库长期使用建议仅补齐缺失项。",
+                                            "persistentHint": True,
+                                        },
+                                    }
+                                ],
+                            },
+                        ],
                     },
+                    {
+                        "component": "VRow",
+                        "content": [
+                            self._number_field(
+                                "max_targets",
+                                "单次最多处理目标",
+                                0,
+                                100000,
+                                hint="0 表示不限量；延后目标下轮继续。",
+                            ),
+                            self._number_field(
+                                "interval_seconds",
+                                "目标间隔（秒）",
+                                0,
+                                30,
+                                step=0.1,
+                                hint="降低刮削端和网络压力。",
+                            ),
+                            self._number_field(
+                                "retry_count",
+                                "异常重试次数",
+                                0,
+                                3,
+                                hint="单个目标异常后的额外尝试次数。",
+                            ),
+                            self._number_field(
+                                "full_scan_days",
+                                "目标完整复核（天）",
+                                0,
+                                365,
+                                hint="0 表示成功目标永不按时间重新刮削。",
+                            ),
+                        ],
+                    },
+                ],
+            ),
+            self._form_section(
+                "4. NFO 字段修复",
+                "独立检查电视剧单集 NFO，与目标刮削缓存分开统计。",
+                [
                     {
                         "component": "VAlert",
                         "props": {
                             "type": "info",
                             "variant": "tonal",
-                            "text": "首次保持预演模式。确认摘要后，先对小目录关闭预演进行验证。",
+                            "text": "只补空白 plot/outline，只替换“第 N 集”等通用标题；不改正常标题、ID、年份、文件名或图片。",
                         },
                     },
+                    {
+                        "component": "VRow",
+                        "content": [
+                            self._switch(
+                                "repair_nfo_fields",
+                                "修复空白概要和通用标题",
+                                "建议先对小目录预演。",
+                            ),
+                            self._number_field(
+                                "nfo_audit_days",
+                                "NFO 完整复核（天）",
+                                0,
+                                365,
+                                hint="0 表示仅在 NFO 文件状态变化后重新检查。",
+                            ),
+                        ],
+                    },
+                ],
+            ),
+            self._form_section(
+                "5. 一次性维护",
+                "这些操作会增加下一轮处理量，日常运行保持关闭。",
+                [
+                    {
+                        "component": "VRow",
+                        "content": [
+                            self._switch(
+                                "force_full_scan",
+                                "下次忽略目标缓存",
+                                "仅下一轮强制处理，保存后自动复位。",
+                            ),
+                            self._switch(
+                                "clear_cache",
+                                "清空全部增量缓存",
+                                "删除目标与 NFO 检查记录，下轮重建。",
+                            ),
+                        ],
+                    },
+                ],
+            ),
+        ]
+        return [
+            {
+                "component": "VForm",
+                "content": [
+                    {
+                        "component": "VExpansionPanels",
+                        "props": {
+                            "variant": "accordion",
+                            "multiple": True,
+                            "modelValue": [0, 1],
+                        },
+                        "content": sections,
+                    }
                 ],
             }
         ], self._default_config()
@@ -400,53 +514,61 @@ class LibraryScraperFix(_PluginBase):
         running_status = getattr(self, "_running_status", {})
         if running_status:
             status = running_status
-            text = (
-                f"运行中：{status.get('stage', '处理中')}\n"
-                f"进度：{status.get('current', 0)} / {status.get('total', 0)}"
-            )
-            alert_type = "info"
-        else:
-            try:
-                last_run = self.get_data(self._last_run_key) or {}
-            except Exception as err:
-                logger.error(f"读取媒体库刮削运行摘要失败：{err}")
-                last_run = {}
-            if not last_run:
-                text = "暂无运行记录"
-                alert_type = "info"
-            else:
-                text = self._format_page_summary(last_run)
-                if (
-                    last_run.get("failed")
-                    or last_run.get("scan_errors")
-                    or last_run.get("invalid_paths")
-                ):
-                    alert_type = "error"
-                elif (
-                    last_run.get("partial")
-                    or last_run.get("unrecognized")
-                    or last_run.get("cancelled")
-                ):
-                    alert_type = "warning"
-                else:
-                    alert_type = "success"
-        page = [
-            {
-                "component": "VAlert",
-                "props": {
-                    "type": alert_type,
-                    "variant": "tonal",
-                    "text": text,
+            current = int(status.get("current", 0) or 0)
+            total = int(status.get("total", 0) or 0)
+            progress = round(current / total * 100, 1) if total else 0
+            return [
+                {
+                    "component": "VAlert",
+                    "props": {
+                        "type": "info",
+                        "variant": "tonal",
+                        "title": f"运行中：{status.get('stage', '处理中')}",
+                        "text": f"当前进度 {current} / {total}",
+                    },
                 },
-            }
-        ]
-        if not running_status and last_run:
-            details = last_run.get("details") or []
-            failures = last_run.get("failures") or []
-            if details:
-                page.append(self._details_panel(details))
-            if failures:
-                page.append(self._failures_panel(failures))
+                {
+                    "component": "VProgressLinear",
+                    "props": {
+                        "modelValue": progress,
+                        "indeterminate": not total,
+                        "height": 8,
+                        "rounded": True,
+                        "color": "primary",
+                    },
+                },
+            ]
+
+        try:
+            last_run = self.get_data(self._last_run_key) or {}
+        except Exception as err:
+            logger.error(f"读取媒体库刮削运行摘要失败：{err}")
+            last_run = {}
+        if not last_run:
+            return [
+                {
+                    "component": "VAlert",
+                    "props": {
+                        "type": "info",
+                        "variant": "tonal",
+                        "title": "暂无运行记录",
+                        "text": "下一次运行后将显示结果、缓存命中、待处理原因和耗时。",
+                    },
+                }
+            ]
+
+        page = [self._status_alert(last_run)]
+        issues = self._issue_items(last_run)
+        if issues:
+            page.append(self._issues_panel(issues))
+        page.extend(self._overview_components(last_run))
+
+        details = self._target_detail_items(last_run)
+        if details:
+            slow_panel = self._slow_targets_panel(details)
+            if slow_panel:
+                page.append(slow_panel)
+            page.append(self._details_panel(details))
         return page
 
     def run(self, progress_callback=None):
@@ -492,10 +614,16 @@ class LibraryScraperFix(_PluginBase):
             )
             candidates = []
             for target in ordered_targets:
-                if self._should_skip_target(target, scan_state) and not self._nfo_repair_due(target):
+                scraper_cached = self._should_skip_target(target, scan_state)
+                nfo_due = self._nfo_repair_due(target) if scraper_cached else False
+                if scraper_cached and not nfo_due:
                     summary["unchanged"] += 1
                 else:
                     candidates.append(target)
+                    reason = self._candidate_reason(
+                        target, scan_state, scraper_cached, nfo_due
+                    )
+                    summary[f"eligible_{reason}"] += 1
             summary["eligible"] = len(candidates)
 
             if self._max_targets and len(candidates) > self._max_targets:
@@ -1500,6 +1628,28 @@ class LibraryScraperFix(_PluginBase):
         except (KeyError, TypeError, ValueError):
             return False
 
+    def _candidate_reason(
+        self,
+        target: ScrapeTarget,
+        state: Dict[str, Any],
+        scraper_cached: bool,
+        nfo_due: bool,
+    ) -> str:
+        if scraper_cached and nfo_due:
+            return "nfo"
+        if not self._incremental or self._force_full_scan:
+            return "forced"
+        previous = state.get(target.key)
+        if not isinstance(previous, dict):
+            return "new"
+        if previous.get("status") != "success":
+            return "retry"
+        if previous.get("mode", "") != self._mode:
+            return "policy"
+        if previous.get("fingerprint") != target.fingerprint:
+            return "changed"
+        return "periodic"
+
     @staticmethod
     def _candidate_sort_key(target: ScrapeTarget, state: Dict[str, Any]) -> Tuple[str, str]:
         previous = state.get(target.key) or {}
@@ -1595,16 +1745,17 @@ class LibraryScraperFix(_PluginBase):
         cls, summary: Dict[str, Any], target: ScrapeTarget, outcome: ScrapeOutcome
     ) -> None:
         details = summary.setdefault("details", [])
+        issues = summary.setdefault("issues", [])
 
-        def append_detail(item: Dict[str, Any]) -> None:
-            if len(details) < cls._detail_limit:
-                details.append(item)
+        def append_limited(collection: List[Dict[str, Any]], item: Dict[str, Any]) -> None:
+            if len(collection) < cls._detail_limit:
+                collection.append(item)
                 return
             if item.get("status") not in ("unrecognized", "failed"):
                 return
-            for index, existing in enumerate(details):
+            for index, existing in enumerate(collection):
                 if existing.get("status") not in ("unrecognized", "failed"):
-                    details[index] = item
+                    collection[index] = item
                     return
 
         detail = outcome.detail
@@ -1612,7 +1763,8 @@ class LibraryScraperFix(_PluginBase):
             detail = "未识别到媒体信息"
         elif not detail and outcome.status == "partial":
             detail = "部分媒体文件未完成"
-        append_detail(
+        append_limited(
+            details,
             {
                 "status": outcome.status,
                 "path": str(target.path),
@@ -1621,15 +1773,31 @@ class LibraryScraperFix(_PluginBase):
                 "duration_seconds": outcome.duration_seconds,
             }
         )
-        for item in outcome.item_details:
-            append_detail(
+
+        if outcome.item_details:
+            for item in outcome.item_details:
+                append_limited(
+                    issues,
+                    {
+                        "status": item.get("status", outcome.status),
+                        "target": str(target.path),
+                        "path": item.get("path", str(target.path)),
+                        "files": item.get("files", 1),
+                        "detail": str(item.get("detail", ""))[:500],
+                        "duration_seconds": item.get("duration_seconds", 0),
+                    },
+                )
+        elif outcome.status in ("failed", "unrecognized", "partial", "cancelled"):
+            append_limited(
+                issues,
                 {
-                    "status": item.get("status", outcome.status),
-                    "path": item.get("path", str(target.path)),
-                    "files": item.get("files", 1),
-                    "detail": str(item.get("detail", ""))[:500],
-                    "duration_seconds": item.get("duration_seconds", 0),
-                }
+                    "status": outcome.status,
+                    "target": str(target.path),
+                    "path": str(target.path),
+                    "files": target.file_count,
+                    "detail": detail[:500] if detail else "",
+                    "duration_seconds": outcome.duration_seconds,
+                },
             )
 
     def _save_run_summary(self, summary: Dict[str, Any]) -> None:
@@ -1666,29 +1834,499 @@ class LibraryScraperFix(_PluginBase):
         if len(failures) < 20:
             failures.append({"path": path, "detail": detail[:500]})
 
+    @classmethod
+    def _status_alert(cls, summary: Dict[str, Any]) -> dict:
+        problem_count = cls._problem_count(summary)
+        if summary.get("failed") or summary.get("scan_errors") or summary.get("invalid_paths"):
+            alert_type = "error"
+            title = f"运行完成，{problem_count} 项需要处理"
+        elif problem_count:
+            alert_type = "warning"
+            title = f"运行完成，{problem_count} 项需要处理"
+        else:
+            alert_type = "success"
+            title = "运行完成，未发现问题"
+        mode = "预演" if summary.get("dry_run_enabled") else "执行"
+        finished_at = summary.get("finished_at") or summary.get("started_at") or "-"
+        return {
+            "component": "VAlert",
+            "props": {
+                "type": alert_type,
+                "variant": "tonal",
+                "title": title,
+                "text": (
+                    f"{finished_at} | {mode} | "
+                    f"总耗时 {cls._format_duration(summary.get('duration_seconds', 0))}"
+                ),
+            },
+        }
+
+    @staticmethod
+    def _problem_count(summary: Dict[str, Any]) -> int:
+        return sum(
+            int(summary.get(key, 0) or 0)
+            for key in ("failed", "partial", "unrecognized", "scan_errors", "invalid_paths")
+        ) + int(bool(summary.get("cancelled")))
+
+    @staticmethod
+    def _format_duration(value: Any) -> str:
+        try:
+            seconds = max(0.0, float(value or 0))
+        except (TypeError, ValueError):
+            seconds = 0.0
+        if seconds >= 3600:
+            hours = int(seconds // 3600)
+            minutes = int(seconds % 3600 // 60)
+            remainder = round(seconds % 60, 1)
+            return f"{hours} 小时 {minutes} 分 {remainder:g} 秒"
+        if seconds >= 60:
+            minutes = int(seconds // 60)
+            remainder = round(seconds % 60, 1)
+            return f"{minutes} 分 {remainder:g} 秒"
+        return f"{round(seconds, 2):g} 秒"
+
+    @staticmethod
+    def _metric_card(title: str, primary: str, secondary: str) -> dict:
+        return {
+            "component": "VCol",
+            "props": {"cols": 12, "sm": 6, "lg": 3},
+            "content": [
+                {
+                    "component": "VCard",
+                    "props": {"variant": "outlined", "class": "h-100"},
+                    "content": [
+                        {
+                            "component": "VCardSubtitle",
+                            "props": {"class": "pt-4"},
+                            "text": title,
+                        },
+                        {
+                            "component": "VCardTitle",
+                            "props": {"class": "text-h6"},
+                            "text": primary,
+                        },
+                        {
+                            "component": "VCardText",
+                            "props": {"class": "text-medium-emphasis pt-0"},
+                            "text": secondary,
+                        },
+                    ],
+                }
+            ],
+        }
+
+    @classmethod
+    def _overview_components(cls, summary: Dict[str, Any]) -> List[dict]:
+        problems = cls._problem_count(summary)
+        cards = {
+            "component": "VRow",
+            "props": {"class": "mt-1"},
+            "content": [
+                cls._metric_card(
+                    "扫描范围",
+                    f"{summary.get('targets', 0)} 个目标",
+                    f"{summary.get('media_files', 0)} 个媒体文件",
+                ),
+                cls._metric_card(
+                    "本轮分流",
+                    f"{summary.get('eligible', 0)} 个待处理",
+                    (
+                        f"{summary.get('unchanged', 0)} 个目标缓存命中 | "
+                        f"{summary.get('deferred', 0)} 个延后"
+                    ),
+                ),
+                cls._metric_card(
+                    "处理结果",
+                    f"{summary.get('success', 0)} 个成功",
+                    (
+                        f"{problems} 项需处理 | "
+                        f"{summary.get('deferred', 0)} 个延后"
+                    ),
+                ),
+                cls._metric_card(
+                    "总耗时",
+                    cls._format_duration(summary.get("duration_seconds", 0)),
+                    (
+                        f"扫描 {cls._format_duration(summary.get('scan_seconds', 0))} | "
+                        f"处理 {cls._format_duration(summary.get('process_seconds', 0))}"
+                    ),
+                ),
+            ],
+        }
+        components = [cards, cls._cache_summary(summary), cls._eligibility_summary(summary)]
+
+        scan_seconds = float(summary.get("scan_seconds", 0) or 0)
+        process_seconds = float(summary.get("process_seconds", 0) or 0)
+        measured = scan_seconds + process_seconds
+        if measured:
+            scan_is_slower = scan_seconds >= process_seconds
+            dominant = "扫描媒体库" if scan_is_slower else "处理刮削目标"
+            dominant_seconds = scan_seconds if scan_is_slower else process_seconds
+            share = round(dominant_seconds / measured * 100)
+            components.append(
+                {
+                    "component": "VAlert",
+                    "props": {
+                        "type": "warning" if share >= 70 else "info",
+                        "variant": "tonal",
+                        "title": f"主要耗时：{dominant}（{share}%）",
+                        "text": (
+                            "目标缓存命中可避免重复识别、下载和写入；"
+                            "完整扫描仍会枚举媒体文件以发现新增或变化。"
+                        ),
+                    },
+                }
+            )
+        return components
+
+    @staticmethod
+    def _cache_summary(summary: Dict[str, Any]) -> dict:
+        target_problems = sum(
+            int(summary.get(key, 0) or 0)
+            for key in ("failed", "partial", "unrecognized")
+        )
+        rows = [
+            {
+                "component": "tr",
+                "content": [
+                    {"component": "td", "text": "刮削目标"},
+                    {"component": "td", "text": f"{summary.get('unchanged', 0)} 个"},
+                    {"component": "td", "text": f"{summary.get('eligible', 0)} 个"},
+                    {
+                        "component": "td",
+                        "text": (
+                            f"成功 {summary.get('success', 0)} | "
+                            f"问题 {target_problems} | 延后 {summary.get('deferred', 0)}"
+                        ),
+                    },
+                ],
+            },
+            {
+                "component": "tr",
+                "content": [
+                    {"component": "td", "text": "NFO 文件"},
+                    {"component": "td", "text": f"{summary.get('nfo_cached', 0)} 份"},
+                    {"component": "td", "text": f"{summary.get('nfo_checked', 0)} 份"},
+                    {
+                        "component": "td",
+                        "text": (
+                            f"修复 {summary.get('nfo_updated', 0)} | "
+                            f"预演 {summary.get('nfo_preview', 0)}"
+                        ),
+                    },
+                ],
+            },
+        ]
+        return {
+            "component": "VSheet",
+            "props": {"class": "mt-4", "color": "transparent"},
+            "content": [
+                {
+                    "component": "div",
+                    "props": {"class": "text-subtitle-1 font-weight-medium mb-2"},
+                    "text": "缓存与实际处理",
+                },
+                {
+                    "component": "VTable",
+                    "props": {"density": "compact", "hover": True},
+                    "content": [
+                        {
+                            "component": "thead",
+                            "content": [
+                                {
+                                    "component": "tr",
+                                    "content": [
+                                        {"component": "th", "text": "对象"},
+                                        {"component": "th", "text": "缓存命中"},
+                                        {"component": "th", "text": "本轮待处理/检查"},
+                                        {"component": "th", "text": "结果"},
+                                    ],
+                                }
+                            ],
+                        },
+                        {"component": "tbody", "content": rows},
+                    ],
+                },
+            ],
+        }
+
+    @staticmethod
+    def _eligibility_summary(summary: Dict[str, Any]) -> dict:
+        reasons = [
+            ("eligible_new", "新增目标"),
+            ("eligible_changed", "媒体文件变化"),
+            ("eligible_retry", "上次未完成"),
+            ("eligible_periodic", "目标周期复核"),
+            ("eligible_nfo", "NFO 到期或变化"),
+            ("eligible_policy", "写入策略变化"),
+            ("eligible_forced", "强制处理"),
+        ]
+        rows = [
+            {
+                "component": "tr",
+                "content": [
+                    {"component": "td", "text": label},
+                    {"component": "td", "text": f"{summary.get(key, 0)} 个"},
+                ],
+            }
+            for key, label in reasons
+            if int(summary.get(key, 0) or 0)
+        ]
+        content = [
+            {
+                "component": "div",
+                "props": {"class": "text-subtitle-1 font-weight-medium mb-2"},
+                "text": "为什么这些目标需要处理",
+            }
+        ]
+        if rows:
+            content.append(
+                {
+                    "component": "VTable",
+                    "props": {"density": "compact", "hover": True},
+                    "content": [
+                        {
+                            "component": "thead",
+                            "content": [
+                                {
+                                    "component": "tr",
+                                    "content": [
+                                        {"component": "th", "text": "原因"},
+                                        {"component": "th", "text": "目标数"},
+                                    ],
+                                }
+                            ],
+                        },
+                        {"component": "tbody", "content": rows},
+                    ],
+                }
+            )
+        else:
+            content.append(
+                {
+                    "component": "VAlert",
+                    "props": {
+                        "type": "info",
+                        "variant": "tonal",
+                        "text": "该运行记录由旧版产生；升级后的下一次运行开始统计具体原因。",
+                    },
+                }
+            )
+        return {
+            "component": "VSheet",
+            "props": {"class": "mt-4", "color": "transparent"},
+            "content": content,
+        }
+
+    @staticmethod
+    def _issue_items(summary: Dict[str, Any]) -> List[Dict[str, Any]]:
+        stored_issues = summary.get("issues")
+        if isinstance(stored_issues, list) and stored_issues:
+            raw_items = list(stored_issues)
+        else:
+            raw_items = [
+                dict(item)
+                for item in summary.get("details") or []
+                if item.get("status") in ("failed", "unrecognized", "partial", "cancelled")
+            ]
+            filtered = []
+            for item in raw_items:
+                path = str(item.get("path", "")).rstrip("/")
+                has_more_specific = any(
+                    other is not item
+                    and other.get("status") == item.get("status")
+                    and str(other.get("path", "")).startswith(f"{path}/")
+                    for other in raw_items
+                    if path
+                )
+                if not has_more_specific:
+                    filtered.append(item)
+            raw_items = filtered
+
+        for failure in summary.get("failures") or []:
+            raw_items.append(
+                {
+                    "status": "failed",
+                    "target": "扫描或任务",
+                    "path": failure.get("path", ""),
+                    "files": 0,
+                    "detail": failure.get("detail", ""),
+                    "duration_seconds": 0,
+                }
+            )
+
+        unique = []
+        seen = set()
+        for item in raw_items:
+            key = (
+                item.get("status", ""),
+                item.get("path", ""),
+                item.get("detail", ""),
+            )
+            if key in seen:
+                continue
+            seen.add(key)
+            unique.append(item)
+        return unique
+
+    @staticmethod
+    def _target_detail_items(summary: Dict[str, Any]) -> List[Dict[str, Any]]:
+        details = list(summary.get("details") or [])
+        if "issues" in summary:
+            return details
+        targets = []
+        for item in details:
+            path = str(item.get("path", "")).rstrip("/")
+            has_parent = any(
+                other is not item
+                and other.get("status") == item.get("status")
+                and path.startswith(f"{str(other.get('path', '')).rstrip('/')}/")
+                for other in details
+                if other.get("path")
+            )
+            if not has_parent:
+                targets.append(item)
+        return targets
+
+    @staticmethod
+    def _issues_panel(issues: List[Dict[str, Any]]) -> dict:
+        labels = {
+            "failed": "失败",
+            "unrecognized": "未识别",
+            "partial": "部分完成",
+            "cancelled": "已取消",
+        }
+        grouped = {}
+        for item in issues:
+            grouped.setdefault(item.get("status", "failed"), []).append(item)
+        panels = []
+        for status in ("failed", "unrecognized", "partial", "cancelled"):
+            items = grouped.get(status) or []
+            if not items:
+                continue
+            rows = []
+            for item in items:
+                target = item.get("target") or "-"
+                path = item.get("path", "")
+                rows.append(
+                    {
+                        "component": "tr",
+                        "content": [
+                            {
+                                "component": "td",
+                                "props": {"class": "text-break"},
+                                "text": path,
+                            },
+                            {
+                                "component": "td",
+                                "props": {"class": "text-break"},
+                                "text": "-" if target == path else target,
+                            },
+                            {
+                                "component": "td",
+                                "props": {"class": "text-break"},
+                                "text": item.get("detail", ""),
+                            },
+                            {
+                                "component": "td",
+                                "text": LibraryScraperFix._format_duration(
+                                    item.get("duration_seconds", 0)
+                                ),
+                            },
+                        ],
+                    }
+                )
+            panels.append(
+                {
+                    "component": "VExpansionPanel",
+                    "content": [
+                        {
+                            "component": "VExpansionPanelTitle",
+                            "text": f"{labels[status]}（{len(items)} 条）",
+                        },
+                        {
+                            "component": "VExpansionPanelText",
+                            "content": [
+                                LibraryScraperFix._table(
+                                    ["具体文件或目标", "所属刮削目标", "原因", "耗时"],
+                                    rows,
+                                )
+                            ],
+                        },
+                    ],
+                }
+            )
+        return {
+            "component": "VSheet",
+            "props": {"class": "mt-4", "color": "transparent"},
+            "content": [
+                {
+                    "component": "div",
+                    "props": {"class": "text-subtitle-1 font-weight-medium mb-2"},
+                    "text": f"需要处理（{len(issues)} 条记录）",
+                },
+                {
+                    "component": "VExpansionPanels",
+                    "props": {
+                        "variant": "accordion",
+                        "multiple": True,
+                        "modelValue": list(range(len(panels))),
+                    },
+                    "content": panels,
+                },
+            ],
+        }
+
+    @staticmethod
+    def _table(headers: List[str], rows: List[dict]) -> dict:
+        return {
+            "component": "VTable",
+            "props": {"density": "compact", "hover": True},
+            "content": [
+                {
+                    "component": "thead",
+                    "content": [
+                        {
+                            "component": "tr",
+                            "content": [
+                                {"component": "th", "text": header}
+                                for header in headers
+                            ],
+                        }
+                    ],
+                },
+                {"component": "tbody", "content": rows},
+            ],
+        }
+
     @staticmethod
     def _details_panel(details: List[Dict[str, Any]]) -> dict:
         status_labels = {
-            "success": "成功",
-            "partial": "部分完成",
-            "dry_run": "预演",
-            "unrecognized": "未识别",
-            "failed": "失败",
-            "deferred": "延后",
-            "cancelled": "已取消",
+            "success": "成功目标",
+            "partial": "部分完成目标",
+            "dry_run": "预演目标",
+            "unrecognized": "未识别目标",
+            "failed": "失败目标",
+            "deferred": "延后目标",
+            "cancelled": "取消目标",
         }
         grouped = {}
         for item in details:
             grouped.setdefault(item.get("status", ""), []).append(item)
 
         panels = []
-        open_panels = []
-        for status in ("failed", "unrecognized", "partial", "success", "dry_run", "deferred", "cancelled"):
-            items = grouped.pop(status, [])
+        for status in (
+            "failed",
+            "unrecognized",
+            "partial",
+            "success",
+            "dry_run",
+            "deferred",
+            "cancelled",
+        ):
+            items = grouped.get(status) or []
             if not items:
                 continue
-            if status in ("failed", "unrecognized", "partial", "cancelled"):
-                open_panels.append(len(panels))
             rows = [
                 {
                     "component": "tr",
@@ -1699,7 +2337,12 @@ class LibraryScraperFix(_PluginBase):
                             "text": item.get("path", ""),
                         },
                         {"component": "td", "text": str(item.get("files", 0))},
-                        {"component": "td", "text": f"{item.get('duration_seconds', 0)} 秒"},
+                        {
+                            "component": "td",
+                            "text": LibraryScraperFix._format_duration(
+                                item.get("duration_seconds", 0)
+                            ),
+                        },
                         {
                             "component": "td",
                             "props": {"class": "text-break"},
@@ -1715,68 +2358,53 @@ class LibraryScraperFix(_PluginBase):
                     "content": [
                         {
                             "component": "VExpansionPanelTitle",
-                            "text": f"{status_labels[status]}（{len(items)} 条）",
+                            "text": f"{status_labels[status]}（{len(items)}）",
                         },
                         {
                             "component": "VExpansionPanelText",
                             "content": [
-                                {
-                                    "component": "VTable",
-                                    "props": {"density": "compact", "hover": True},
-                                    "content": [
-                                        {
-                                            "component": "thead",
-                                            "content": [
-                                                {"component": "th", "text": "文件或目标"},
-                                                {"component": "th", "text": "文件"},
-                                                {"component": "th", "text": "耗时"},
-                                                {"component": "th", "text": "说明"},
-                                            ],
-                                        },
-                                        {"component": "tbody", "content": rows},
-                                    ],
-                                }
+                                LibraryScraperFix._table(
+                                    ["刮削目标", "媒体文件", "耗时", "结果说明"], rows
+                                )
                             ],
                         },
                     ],
                 }
             )
         return {
-            "component": "VExpansionPanels",
-            "props": {
-                "variant": "accordion",
-                "multiple": True,
-                "modelValue": [0] if open_panels else [],
-            },
+            "component": "VSheet",
+            "props": {"class": "mt-4", "color": "transparent"},
             "content": [
                 {
-                    "component": "VExpansionPanel",
-                    "content": [
-                        {
-                            "component": "VExpansionPanelTitle",
-                            "text": f"最近运行目标明细（{len(details)} 条）",
-                        },
-                        {
-                            "component": "VExpansionPanelText",
-                            "content": [
-                                {
-                                    "component": "VExpansionPanels",
-                                    "props": {
-                                        "variant": "accordion",
-                                        "multiple": True,
-                                        "modelValue": open_panels,
-                                    },
-                                    "content": panels,
-                                }
-                            ],
-                        },
-                    ],
-                }
+                    "component": "div",
+                    "props": {"class": "text-subtitle-1 font-weight-medium mb-2"},
+                    "text": f"目标结果（{len(details)} 个）",
+                },
+                {
+                    "component": "VExpansionPanels",
+                    "props": {
+                        "variant": "accordion",
+                        "multiple": True,
+                        "modelValue": [],
+                    },
+                    "content": panels,
+                },
             ],
         }
 
     @staticmethod
-    def _failures_panel(failures: List[Dict[str, Any]]) -> dict:
+    def _slow_targets_panel(details: List[Dict[str, Any]]) -> Optional[dict]:
+        slowest = sorted(
+            (
+                item
+                for item in details
+                if float(item.get("duration_seconds", 0) or 0) > 0
+            ),
+            key=lambda item: float(item.get("duration_seconds", 0) or 0),
+            reverse=True,
+        )[:5]
+        if not slowest:
+            return None
         rows = [
             {
                 "component": "tr",
@@ -1788,41 +2416,32 @@ class LibraryScraperFix(_PluginBase):
                     },
                     {
                         "component": "td",
-                        "props": {"class": "text-break"},
-                        "text": item.get("detail", ""),
+                        "text": LibraryScraperFix._format_duration(
+                            item.get("duration_seconds", 0)
+                        ),
                     },
+                    {"component": "td", "text": str(item.get("files", 0))},
                 ],
             }
-            for item in failures
+            for item in slowest
         ]
         return {
             "component": "VExpansionPanels",
-            "props": {"variant": "accordion", "multiple": True},
+            "props": {"variant": "accordion", "multiple": True, "modelValue": []},
             "content": [
                 {
                     "component": "VExpansionPanel",
                     "content": [
                         {
                             "component": "VExpansionPanelTitle",
-                            "text": f"最近运行问题（{len(failures)} 条）",
+                            "text": f"耗时最久的目标（前 {len(slowest)} 个）",
                         },
                         {
                             "component": "VExpansionPanelText",
                             "content": [
-                                {
-                                    "component": "VTable",
-                                    "props": {"density": "compact", "hover": True},
-                                    "content": [
-                                        {
-                                            "component": "thead",
-                                            "content": [
-                                                {"component": "th", "text": "路径"},
-                                                {"component": "th", "text": "问题"},
-                                            ],
-                                        },
-                                        {"component": "tbody", "content": rows},
-                                    ],
-                                }
+                                LibraryScraperFix._table(
+                                    ["刮削目标", "耗时", "媒体文件"], rows
+                                )
                             ],
                         },
                     ],
@@ -1857,33 +2476,62 @@ class LibraryScraperFix(_PluginBase):
             logger.debug(f"更新任务进度失败：{err}")
 
     @staticmethod
-    def _switch(model: str, label: str) -> dict:
+    def _form_section(title: str, description: str, content: List[dict]) -> dict:
         return {
-            "component": "VCol",
-            "props": {"cols": 12, "sm": 6, "md": 4},
+            "component": "VExpansionPanel",
             "content": [
-                {"component": "VSwitch", "props": {"model": model, "label": label}}
+                {"component": "VExpansionPanelTitle", "text": title},
+                {
+                    "component": "VExpansionPanelText",
+                    "content": [
+                        {
+                            "component": "div",
+                            "props": {"class": "text-body-2 text-medium-emphasis mb-4"},
+                            "text": description,
+                        },
+                        *content,
+                    ],
+                },
             ],
         }
 
     @staticmethod
+    def _switch(model: str, label: str, hint: str = "") -> dict:
+        props = {"model": model, "label": label, "color": "primary"}
+        if hint:
+            props.update({"hint": hint, "persistentHint": True})
+        return {
+            "component": "VCol",
+            "props": {"cols": 12, "md": 6},
+            "content": [{"component": "VSwitch", "props": props}],
+        }
+
+    @staticmethod
     def _number_field(
-        model: str, label: str, minimum: float, maximum: float, step: float = 1
+        model: str,
+        label: str,
+        minimum: float,
+        maximum: float,
+        step: float = 1,
+        hint: str = "",
     ) -> dict:
+        props = {
+            "model": model,
+            "label": label,
+            "type": "number",
+            "min": minimum,
+            "max": maximum,
+            "step": step,
+        }
+        if hint:
+            props.update({"hint": hint, "persistentHint": True})
         return {
             "component": "VCol",
             "props": {"cols": 12, "sm": 6, "md": 3},
             "content": [
                 {
                     "component": "VTextField",
-                    "props": {
-                        "model": model,
-                        "label": label,
-                        "type": "number",
-                        "min": minimum,
-                        "max": maximum,
-                        "step": step,
-                    },
+                    "props": props,
                 }
             ],
         }
@@ -1971,6 +2619,13 @@ class LibraryScraperFix(_PluginBase):
             "media_files": 0,
             "targets": 0,
             "eligible": 0,
+            "eligible_new": 0,
+            "eligible_changed": 0,
+            "eligible_retry": 0,
+            "eligible_periodic": 0,
+            "eligible_nfo": 0,
+            "eligible_policy": 0,
+            "eligible_forced": 0,
             "unchanged": 0,
             "deferred": 0,
             "success": 0,
@@ -1998,6 +2653,7 @@ class LibraryScraperFix(_PluginBase):
             "nfo_overviews_updated": 0,
             "failures": [],
             "details": [],
+            "issues": [],
         }
         return summary
 
@@ -2036,6 +2692,22 @@ class LibraryScraperFix(_PluginBase):
         ]
         if summary.get("cancelled"):
             lines.append("状态：已取消")
+        reason_labels = (
+            ("eligible_new", "新增"),
+            ("eligible_changed", "媒体变化"),
+            ("eligible_retry", "上次未完成"),
+            ("eligible_periodic", "周期复核"),
+            ("eligible_nfo", "NFO 到期/变化"),
+            ("eligible_policy", "策略变化"),
+            ("eligible_forced", "强制处理"),
+        )
+        reasons = [
+            f"{label} {summary.get(key, 0)}"
+            for key, label in reason_labels
+            if int(summary.get(key, 0) or 0)
+        ]
+        if reasons:
+            lines.append(f"待处理原因：{'，'.join(reasons)}")
         if summary.get("nfo_checked") or summary.get("nfo_cached"):
             lines.append(
                 "NFO 字段：检查 %s，缓存跳过 %s，预演 %s，已修复 %s（标题 %s，概要 %s）"

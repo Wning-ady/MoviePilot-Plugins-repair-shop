@@ -9,7 +9,7 @@ import traceback
 import xml.etree.ElementTree as ET
 from copy import copy
 from contextlib import contextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Tuple
@@ -101,6 +101,8 @@ class ScrapeOutcome:
     unrecognized_files: int = 0
     failed_files: int = 0
     detail: str = ""
+    item_details: List[Dict[str, Any]] = field(default_factory=list)
+    duration_seconds: float = 0
 
 
 class _NonOverwritingOption:
@@ -136,7 +138,7 @@ class LibraryScraperFix(_PluginBase):
         "https://raw.githubusercontent.com/Wning-ady/"
         "MoviePilot-Plugins-repair-shop/main/icons/Ombi_A.png"
     )
-    plugin_version = "1.1.2"
+    plugin_version = "1.1.3"
     plugin_author = "jxxghp,Wning-ady"
     author_url = "https://github.com/Wning-ady/MoviePilot-Plugins-repair-shop"
     plugin_config_prefix = "libraryscraperfix_"
@@ -449,6 +451,8 @@ class LibraryScraperFix(_PluginBase):
 
         cancel_event = self._cancel_event
         started = time.monotonic()
+        scan_finished = started
+        process_started = started
         started_at = self._now()
         summary = self._new_summary(started_at)
         scan_state = self._load_scan_state()
@@ -464,6 +468,8 @@ class LibraryScraperFix(_PluginBase):
             self._progress(progress_callback, 0, "开始扫描媒体文件", summary)
             exclusions = self._parse_exclusions(summary)
             targets = self._discover_targets(exclusions, summary, cancel_event, progress_callback)
+            scan_finished = time.monotonic()
+            summary["scan_seconds"] = round(scan_finished - started, 2)
             if cancel_event.is_set():
                 summary["cancelled"] = True
                 return False, "任务已取消"
@@ -492,6 +498,7 @@ class LibraryScraperFix(_PluginBase):
                 candidates = candidates[: self._max_targets]
 
             total = len(candidates)
+            process_started = time.monotonic()
             self._running_status = {"stage": "处理刮削目标", "current": 0, "total": total}
             self._progress(progress_callback, 30, f"发现 {total} 个待处理目标", summary)
 
@@ -503,10 +510,12 @@ class LibraryScraperFix(_PluginBase):
                 self._running_status.update(
                     {"stage": str(target.path), "current": index, "total": total}
                 )
+                target_started = time.monotonic()
                 if self._dry_run:
                     outcome = ScrapeOutcome(status="dry_run")
                 else:
                     outcome = self._run_target_with_retry(target, exclusions, cancel_event)
+                outcome.duration_seconds = round(time.monotonic() - target_started, 2)
 
                 if cancel_event.is_set() and outcome.status != "cancelled":
                     outcome.status = "cancelled"
@@ -548,6 +557,12 @@ class LibraryScraperFix(_PluginBase):
         finally:
             summary["finished_at"] = self._now()
             summary["duration_seconds"] = round(time.monotonic() - started, 2)
+            summary["scan_seconds"] = summary.get(
+                "scan_seconds", round(scan_finished - started, 2)
+            )
+            summary["process_seconds"] = round(
+                time.monotonic() - process_started, 2
+            )
             self._save_run_summary(summary)
             self._send_summary(summary)
             self._progress(progress_callback, 100, "任务结束", summary)
@@ -769,6 +784,14 @@ class LibraryScraperFix(_PluginBase):
                 child_mtype = self._infer_type_from_path(child_file, target.source_root)
             if child_mtype not in (MediaType.MOVIE, MediaType.TV):
                 outcome.unrecognized_files += 1
+                outcome.item_details.append(
+                    {
+                        "status": "unrecognized",
+                        "path": str(child_file),
+                        "files": 1,
+                        "detail": "未识别到媒体类型",
+                    }
+                )
                 continue
             try:
                 recognized = self._scrape_one(
@@ -784,9 +807,25 @@ class LibraryScraperFix(_PluginBase):
                     outcome.scraped_files += 1
                 else:
                     outcome.unrecognized_files += 1
+                    outcome.item_details.append(
+                        {
+                            "status": "unrecognized",
+                            "path": str(child_file),
+                            "files": 1,
+                            "detail": "未识别到媒体信息",
+                        }
+                    )
             except Exception as err:
                 outcome.failed_files += 1
                 logger.error(f"回退刮削文件失败：{child_file} - {err}")
+                outcome.item_details.append(
+                    {
+                        "status": "failed",
+                        "path": str(child_file),
+                        "files": 1,
+                        "detail": str(err),
+                    }
+                )
 
         if outcome.status == "cancelled":
             return outcome
@@ -920,6 +959,9 @@ class LibraryScraperFix(_PluginBase):
         if not nfo_path.exists() or nfo_path.is_symlink():
             return
         if not self._nfo_path_due(nfo_path):
+            summary = getattr(self, "_active_summary", None)
+            if summary is not None:
+                summary["nfo_cached"] += 1
             return
 
         summary = getattr(self, "_active_summary", None)
@@ -1465,6 +1507,11 @@ class LibraryScraperFix(_PluginBase):
         summary["unrecognized_files"] += outcome.unrecognized_files
         summary["failed_files"] += outcome.failed_files
         self._record_target_detail(summary, target, outcome)
+        for item in outcome.item_details:
+            if item.get("status") == "failed":
+                self._remember_failure(
+                    summary, item.get("path", str(target.path)), item.get("detail", "")
+                )
         if outcome.detail:
             self._remember_failure(summary, str(target.path), outcome.detail)
 
@@ -1473,21 +1520,42 @@ class LibraryScraperFix(_PluginBase):
         cls, summary: Dict[str, Any], target: ScrapeTarget, outcome: ScrapeOutcome
     ) -> None:
         details = summary.setdefault("details", [])
-        if len(details) >= cls._detail_limit:
-            return
+
+        def append_detail(item: Dict[str, Any]) -> None:
+            if len(details) < cls._detail_limit:
+                details.append(item)
+                return
+            if item.get("status") not in ("unrecognized", "failed"):
+                return
+            for index, existing in enumerate(details):
+                if existing.get("status") not in ("unrecognized", "failed"):
+                    details[index] = item
+                    return
+
         detail = outcome.detail
         if not detail and outcome.status == "unrecognized":
             detail = "未识别到媒体信息"
         elif not detail and outcome.status == "partial":
             detail = "部分媒体文件未完成"
-        details.append(
+        append_detail(
             {
                 "status": outcome.status,
                 "path": str(target.path),
                 "files": target.file_count,
                 "detail": detail[:500] if detail else "",
+                "duration_seconds": outcome.duration_seconds,
             }
         )
+        for item in outcome.item_details:
+            append_detail(
+                {
+                    "status": item.get("status", outcome.status),
+                    "path": item.get("path", str(target.path)),
+                    "files": item.get("files", 1),
+                    "detail": str(item.get("detail", ""))[:500],
+                    "duration_seconds": item.get("duration_seconds", 0),
+                }
+            )
 
     def _save_run_summary(self, summary: Dict[str, Any]) -> None:
         try:
@@ -1534,24 +1602,63 @@ class LibraryScraperFix(_PluginBase):
             "deferred": "延后",
             "cancelled": "已取消",
         }
-        rows = []
+        grouped = {}
         for item in details:
-            status = item.get("status", "")
-            rows.append(
+            grouped.setdefault(item.get("status", ""), []).append(item)
+
+        panels = []
+        for status in ("failed", "unrecognized", "partial", "success", "dry_run", "deferred", "cancelled"):
+            items = grouped.pop(status, [])
+            if not items:
+                continue
+            rows = [
                 {
                     "component": "tr",
                     "content": [
-                        {"component": "td", "text": status_labels.get(status, status)},
                         {
                             "component": "td",
                             "props": {"class": "text-break"},
                             "text": item.get("path", ""),
                         },
                         {"component": "td", "text": str(item.get("files", 0))},
+                        {"component": "td", "text": f"{item.get('duration_seconds', 0)} 秒"},
                         {
                             "component": "td",
                             "props": {"class": "text-break"},
                             "text": item.get("detail", ""),
+                        },
+                    ],
+                }
+                for item in items
+            ]
+            panels.append(
+                {
+                    "component": "VExpansionPanel",
+                    "content": [
+                        {
+                            "component": "VExpansionPanelTitle",
+                            "text": f"{status_labels[status]}（{len(items)} 条）",
+                        },
+                        {
+                            "component": "VExpansionPanelText",
+                            "content": [
+                                {
+                                    "component": "VTable",
+                                    "props": {"density": "compact", "hover": True},
+                                    "content": [
+                                        {
+                                            "component": "thead",
+                                            "content": [
+                                                {"component": "th", "text": "文件或目标"},
+                                                {"component": "th", "text": "文件"},
+                                                {"component": "th", "text": "耗时"},
+                                                {"component": "th", "text": "说明"},
+                                            ],
+                                        },
+                                        {"component": "tbody", "content": rows},
+                                    ],
+                                }
+                            ],
                         },
                     ],
                 }
@@ -1571,20 +1678,9 @@ class LibraryScraperFix(_PluginBase):
                             "component": "VExpansionPanelText",
                             "content": [
                                 {
-                                    "component": "VTable",
-                                    "props": {"density": "compact", "hover": True},
-                                    "content": [
-                                        {
-                                            "component": "thead",
-                                            "content": [
-                                                {"component": "th", "text": "结果"},
-                                                {"component": "th", "text": "目标"},
-                                                {"component": "th", "text": "文件"},
-                                                {"component": "th", "text": "说明"},
-                                            ],
-                                        },
-                                        {"component": "tbody", "content": rows},
-                                    ],
+                                    "component": "VExpansionPanels",
+                                    "props": {"variant": "accordion", "multiple": True},
+                                    "content": panels,
                                 }
                             ],
                         },
@@ -1782,6 +1878,8 @@ class LibraryScraperFix(_PluginBase):
             "started_at": started_at,
             "finished_at": None,
             "duration_seconds": 0,
+            "scan_seconds": 0,
+            "process_seconds": 0,
             "dry_run_enabled": self._dry_run,
             "cancelled": False,
             "media_files": 0,
@@ -1807,6 +1905,7 @@ class LibraryScraperFix(_PluginBase):
             "invalid_paths": 0,
             "stale_state_removed": 0,
             "nfo_checked": 0,
+            "nfo_cached": 0,
             "nfo_preview": 0,
             "nfo_updated": 0,
             "nfo_titles_updated": 0,
@@ -1847,14 +1946,16 @@ class LibraryScraperFix(_PluginBase):
             f"失败：{summary.get('failed', 0)}",
             f"延后：{summary.get('deferred', 0)}",
             f"耗时：{summary.get('duration_seconds', 0)} 秒",
+            f"扫描：{summary.get('scan_seconds', 0)} 秒，处理：{summary.get('process_seconds', 0)} 秒",
         ]
         if summary.get("cancelled"):
             lines.append("状态：已取消")
         if summary.get("nfo_checked"):
             lines.append(
-                "NFO 字段：检查 %s，预演 %s，已修复 %s（标题 %s，概要 %s）"
+                "NFO 字段：检查 %s，缓存跳过 %s，预演 %s，已修复 %s（标题 %s，概要 %s）"
                 % (
                     summary.get("nfo_checked", 0),
+                    summary.get("nfo_cached", 0),
                     summary.get("nfo_preview", 0),
                     summary.get("nfo_updated", 0),
                     summary.get("nfo_titles_updated", 0),
@@ -1878,9 +1979,11 @@ class LibraryScraperFix(_PluginBase):
             f"未识别：{summary.get('unrecognized', 0)}，失败：{summary.get('failed', 0)}\n"
             f"未变化跳过：{summary.get('unchanged', 0)}，耗时："
             f"{summary.get('duration_seconds', 0)} 秒"
+            f"\n扫描：{summary.get('scan_seconds', 0)} 秒，处理："
+            f"{summary.get('process_seconds', 0)} 秒"
             + (
-                f"\nNFO：检查 {summary.get('nfo_checked', 0)}，修复 "
-                f"{summary.get('nfo_updated', 0)}"
+                f"\nNFO：检查 {summary.get('nfo_checked', 0)}，缓存跳过 "
+                f"{summary.get('nfo_cached', 0)}，修复 {summary.get('nfo_updated', 0)}"
                 if summary.get("nfo_checked")
                 else ""
             )

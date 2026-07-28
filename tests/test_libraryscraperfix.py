@@ -270,6 +270,8 @@ class LibraryScraperFixTests(unittest.TestCase):
         plugin = self.plugin()
         summary = plugin._new_summary(plugin._now())
         summary["finished_at"] = plugin._now()
+        summary["scan_seconds"] = 12.3
+        summary["process_seconds"] = 4.5
         target = ScrapeTarget(
             path=Path("/media/Movie"),
             mtype=_MediaType.MOVIE,
@@ -278,7 +280,9 @@ class LibraryScraperFixTests(unittest.TestCase):
             file_count=2,
         )
         plugin._apply_outcome(
-            summary, target, ScrapeOutcome(status="success", scraped_files=2)
+            summary,
+            target,
+            ScrapeOutcome(status="success", scraped_files=2, duration_seconds=1.2),
         )
         plugin._apply_outcome(
             summary,
@@ -299,10 +303,16 @@ class LibraryScraperFixTests(unittest.TestCase):
         self.assertEqual(page[0]["component"], "VAlert")
         self.assertEqual(page[1]["component"], "VExpansionPanels")
         self.assertEqual(page[2]["component"], "VExpansionPanels")
-        detail_rows = page[1]["content"][0]["content"][1]["content"][0]["content"][1]["content"]
-        self.assertEqual(detail_rows[0]["content"][0]["text"], "成功")
-        self.assertEqual(detail_rows[1]["content"][0]["text"], "未识别")
-        self.assertEqual(detail_rows[1]["content"][3]["text"], "未识别到媒体信息")
+        groups = page[1]["content"][0]["content"][1]["content"][0]["content"]
+        self.assertEqual(groups[0]["content"][0]["text"], "未识别（1 条）")
+        self.assertEqual(groups[1]["content"][0]["text"], "成功（1 条）")
+        unrecognized_rows = groups[0]["content"][1]["content"][0]["content"][1]["content"]
+        success_rows = groups[1]["content"][1]["content"][0]["content"][1]["content"]
+        self.assertEqual(unrecognized_rows[0]["content"][3]["text"], "未识别到媒体信息")
+        self.assertEqual(success_rows[0]["content"][2]["text"], "1.2 秒")
+        headers = groups[0]["content"][1]["content"][0]["content"][0]["content"]
+        self.assertEqual(headers[2]["text"], "耗时")
+        self.assertIn("扫描：12.3 秒，处理：4.5 秒", page[0]["props"]["text"])
 
     def test_path_parser_supports_forced_type_and_literal_hash(self):
         path, mtype = LibraryScraperFix._parse_scraper_line("/media/tv#电视剧")
@@ -720,8 +730,74 @@ class LibraryScraperFixTests(unittest.TestCase):
         self.assertEqual(outcome.status, "partial")
         self.assertEqual(outcome.scraped_files, 1)
         self.assertEqual(outcome.unrecognized_files, 1)
+        self.assertEqual(len(outcome.item_details), 1)
+        self.assertEqual(outcome.item_details[0]["status"], "unrecognized")
+        self.assertTrue(outcome.item_details[0]["path"].endswith(".mkv"))
         state = {target.key: plugin._state_entry(target, outcome.status)}
         self.assertFalse(plugin._should_skip_target(target, state))
+
+    def test_fallback_failure_records_specific_media_file(self):
+        plugin = self.plugin()
+        plugin._dry_run = False
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "电视剧"
+            media = root / "Show" / "Season 1" / "Show.S01E01.mkv"
+            media.parent.mkdir(parents=True)
+            media.touch()
+            target = ScrapeTarget(
+                path=root / "Show",
+                mtype=_MediaType.TV,
+                target_type=plugin._target_dir,
+                source_root=root,
+                file_count=1,
+            )
+            with mock.patch.object(
+                plugin, "_scrape_one", side_effect=[False, RuntimeError("读取失败")]
+            ):
+                outcome = plugin._scrape_target(target, [], threading.Event())
+
+        self.assertEqual(outcome.status, "failed")
+        self.assertEqual(outcome.failed_files, 1)
+        self.assertEqual(outcome.item_details[0]["path"], str(media))
+        self.assertIn("读取失败", outcome.item_details[0]["detail"])
+        summary = plugin._new_summary(plugin._now())
+        plugin._apply_outcome(summary, target, outcome)
+        self.assertEqual(summary["failures"][0]["path"], str(media))
+
+    def test_problem_detail_replaces_normal_detail_when_full(self):
+        plugin = self.plugin()
+        summary = plugin._new_summary(plugin._now())
+        target = ScrapeTarget(
+            path=Path("/media/Movie"),
+            mtype=_MediaType.MOVIE,
+            target_type=plugin._target_file,
+            source_root=Path("/media"),
+            file_count=1,
+        )
+        for index in range(plugin._detail_limit):
+            plugin._record_target_detail(
+                summary,
+                target,
+                ScrapeOutcome(status="success", detail=str(index)),
+            )
+        plugin._record_target_detail(
+            summary,
+            target,
+            ScrapeOutcome(
+                status="partial",
+                item_details=[
+                    {
+                        "status": "failed",
+                        "path": "/media/Movie.broken.mkv",
+                        "files": 1,
+                        "detail": "读取失败",
+                    }
+                ],
+            ),
+        )
+        self.assertTrue(
+            any(item["path"] == "/media/Movie.broken.mkv" for item in summary["details"])
+        )
 
     def test_scrape_target_passes_cancel_event_before_source_root(self):
         plugin = self.plugin()
@@ -987,6 +1063,19 @@ class LibraryScraperFixTests(unittest.TestCase):
             plugin._nfo_audit_days = 1
             plugin._nfo_repair_state[str(nfo)]["updated_at"] = "2000-01-01T00:00:00+00:00"
             self.assertTrue(plugin._nfo_repair_due(target))
+
+    def test_nfo_cache_skip_is_counted_in_summary(self):
+        plugin = self.plugin()
+        plugin._repair_nfo_enabled = True
+        plugin._active_summary = plugin._new_summary(plugin._now())
+        with tempfile.TemporaryDirectory() as tmp:
+            media = Path(tmp) / "Show.S01E15.mkv"
+            media.touch()
+            media.with_suffix(".nfo").write_text("<episodedetails />", encoding="utf-8")
+            with mock.patch.object(plugin, "_nfo_path_due", return_value=False):
+                plugin._repair_episode_nfo(media, types.SimpleNamespace())
+
+        self.assertEqual(plugin._active_summary["nfo_cached"], 1)
 
     def test_nfo_repair_due_ignores_directory_targets(self):
         plugin = self.plugin()

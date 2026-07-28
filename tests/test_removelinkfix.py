@@ -1,9 +1,11 @@
 import importlib.util
 import ast
 import json
+import os
 import struct
 import sys
 import tempfile
+import threading
 import types
 import unittest
 from datetime import datetime
@@ -26,12 +28,33 @@ def _module(name, **attributes):
 
 class _Dummy:
     SiteMessage = "site"
+    DownloadFileDeleted = "downloadfile.deleted"
 
 
-for package in ("app", "app.db", "app.plugins", "app.schemas", "app.core", "app.chain"):
+for package in (
+    "app",
+    "app.db",
+    "app.db.models",
+    "app.plugins",
+    "app.schemas",
+    "app.core",
+    "app.chain",
+):
     sys.modules.setdefault(package, types.ModuleType(package))
 
 _module("app.db.transferhistory_oper", TransferHistoryOper=object)
+
+
+class _DestinationColumn:
+    def __eq__(self, destination):
+        return destination
+
+
+class _TransferHistoryModel:
+    dest = _DestinationColumn()
+
+
+_module("app.db.models.transferhistory", TransferHistory=_TransferHistoryModel)
 _module("app.log", logger=_Logger())
 _module("app.plugins", _PluginBase=object)
 _module("app.schemas", NotificationType=_Dummy, FileItem=object)
@@ -50,52 +73,112 @@ RemoveLinkFix = PLUGIN.RemoveLinkFix
 
 
 class _History:
-    def __init__(self, record_id):
+    def __init__(
+        self,
+        record_id,
+        src="/downloads/example.mkv",
+        dest="/media/example.mkv",
+        status=True,
+        mode="link",
+        download_hash="example-hash",
+    ):
         self.id = record_id
+        self.src = src
+        self.dest = dest
+        self.status = status
+        self.mode = mode
+        self.download_hash = download_hash
 
 
 class _HistoryStore:
-    def __init__(self, src=None, dest=None):
+    def __init__(self, src=None, dest=None, histories=None):
         self.src = src
         self.dest = dest
+        self.histories = list(histories or [])
+        for history in (src, dest):
+            if history and all(item.id != history.id for item in self.histories):
+                self.histories.append(history)
         self.deleted = []
+        self._db = _HistoryDatabase(self.histories)
+        sys.modules["app.db"].ScopedSession = lambda: self._db
 
-    def get_by_src(self, _path):
-        return self.src
+    def get(self, record_id):
+        return next((item for item in self.histories if item.id == record_id), None)
 
-    def get_by_dest(self, _path):
-        return self.dest
+    def get_by_src(self, path):
+        return next((item for item in self.histories if item.src == path), None)
+
+    def get_by_dest(self, path):
+        return next((item for item in self.histories if item.dest == path), None)
+
+    def list_success_by_src(self, path):
+        return [
+            item for item in self.histories if item.src == path and item.status is True
+        ]
 
     def delete(self, record_id):
         self.deleted.append(record_id)
 
 
+class _HistoryQuery:
+    def __init__(self, histories):
+        self.histories = histories
+        self.destination = None
+        self.maximum = None
+
+    def filter(self, destination):
+        self.destination = destination
+        return self
+
+    def limit(self, maximum):
+        self.maximum = maximum
+        return self
+
+    def all(self):
+        matches = [
+            history
+            for history in self.histories
+            if history.dest == self.destination
+        ]
+        return matches[: self.maximum]
+
+
+class _HistoryDatabase:
+    def __init__(self, histories):
+        self.histories = histories
+
+    def query(self, _model):
+        return _HistoryQuery(self.histories)
+
+    def close(self):
+        pass
+
+
 class RemoveLinkFixTests(unittest.TestCase):
+    def setUp(self):
+        self.events = []
+        PLUGIN.eventmanager = types.SimpleNamespace(
+            send_event=lambda event_type, data: self.events.append((event_type, data))
+        )
+
     def plugin(self):
         plugin = RemoveLinkFix.__new__(RemoveLinkFix)
         plugin._delete_history = True
+        plugin._delete_torrents = False
+        plugin._delete_scrap_infos = False
+        plugin._delayed_deletion = True
+        plugin._delay_seconds = 30
         plugin._custom_scrap_extensions = []
         plugin.exclude_dirs = ""
+        plugin.monitor_dirs = ""
         plugin._notify = False
+        plugin._observer = []
+        plugin._deletion_timer = None
+        plugin._stop_event = threading.Event()
+        plugin._lifecycle_lock = threading.Lock()
+        plugin.deletion_queue = []
+        plugin.file_state = {}
         return plugin
-
-    def test_history_falls_back_to_destination(self):
-        plugin = self.plugin()
-        plugin._transferhistory = _HistoryStore(dest=_History(42))
-        self.assertTrue(plugin.delete_history("/media/example.mkv"))
-        self.assertEqual(plugin._transferhistory.deleted, [42])
-
-    def test_history_prefers_exact_source_match(self):
-        plugin = self.plugin()
-        plugin._transferhistory = _HistoryStore(src=_History(7), dest=_History(42))
-        self.assertTrue(plugin.delete_history("/downloads/example.mkv"))
-        self.assertEqual(plugin._transferhistory.deleted, [7])
-
-    def test_history_reports_no_match(self):
-        plugin = self.plugin()
-        plugin._transferhistory = _HistoryStore()
-        self.assertFalse(plugin.delete_history("/media/missing.mkv"))
-        self.assertEqual(plugin._transferhistory.deleted, [])
 
     def test_episode_thumbnail_and_media_extension_guard(self):
         plugin = self.plugin()
@@ -191,6 +274,473 @@ class RemoveLinkFixTests(unittest.TestCase):
 
         self.assertEqual(executed, [])
         self.assertEqual(plugin.deletion_queue, [])
+
+    def test_directory_deletion_never_emits_torrent_event(self):
+        sync = types.SimpleNamespace(_delete_torrents=True)
+        handler = PLUGIN.FileMonitorHandler("/media", sync)
+
+        handler.on_deleted(
+            types.SimpleNamespace(is_directory=True, src_path="/media/show")
+        )
+
+        self.assertEqual(self.events, [])
+
+    def test_stop_service_waits_for_running_timer_callback(self):
+        plugin = self.plugin()
+        started = threading.Event()
+        finished = threading.Event()
+
+        def running_callback():
+            started.set()
+            plugin._stop_event.wait(2)
+            finished.set()
+
+        timer = threading.Timer(0, running_callback)
+        plugin._deletion_timer = timer
+        timer.start()
+        self.assertTrue(started.wait(1))
+
+        plugin.stop_service()
+
+        self.assertTrue(finished.is_set())
+        self.assertFalse(timer.is_alive())
+        self.assertIsNone(plugin._deletion_timer)
+
+    def test_library_target_deletion_preserves_source_history_and_torrent(self):
+        for delayed in (False, True):
+            with self.subTest(delayed=delayed), tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp)
+                source = root / "downloads" / "episode.mkv"
+                destination = root / "media" / "episode.mkv"
+                source.parent.mkdir()
+                destination.parent.mkdir()
+                source.write_bytes(b"episode")
+                os.link(source, destination)
+                target_stat = destination.lstat()
+                history = _History(24007, src=str(source), dest=str(destination))
+                store = _HistoryStore(src=history, dest=history)
+                plugin = self.plugin()
+                plugin._delayed_deletion = delayed
+                plugin._delete_torrents = True
+                plugin._transferhistory = store
+                plugin.file_state = {
+                    str(source): PLUGIN.FileInfo(
+                        target_stat.st_dev, target_stat.st_ino, datetime.now()
+                    ),
+                    str(destination): PLUGIN.FileInfo(
+                        target_stat.st_dev, target_stat.st_ino, datetime.now()
+                    ),
+                }
+
+                destination.unlink()
+                plugin.handle_deleted(destination)
+
+                self.assertTrue(source.exists())
+                self.assertEqual(store.deleted, [])
+                self.assertEqual(plugin.deletion_queue, [])
+                self.assertEqual(self.events, [])
+
+    def test_source_deletion_requires_unique_successful_link_record(self):
+        cases = (
+            ([], "missing"),
+            ([_History(1, status=False)], "failed"),
+            ([_History(1, mode="copy")], "copy"),
+            ([_History(1), _History(2)], "ambiguous"),
+        )
+        for histories, label in cases:
+            with self.subTest(case=label), tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp)
+                source = root / "downloads" / "episode.mkv"
+                destination = root / "media" / "episode.mkv"
+                source.parent.mkdir()
+                destination.parent.mkdir()
+                source.write_bytes(b"episode")
+                os.link(source, destination)
+                source_stat = source.lstat()
+                for history in histories:
+                    history.src = str(source)
+                    history.dest = str(destination)
+                store = _HistoryStore(histories=histories)
+                plugin = self.plugin()
+                plugin._delete_torrents = True
+                plugin._transferhistory = store
+                plugin.file_state = {
+                    str(source): PLUGIN.FileInfo(
+                        source_stat.st_dev, source_stat.st_ino, datetime.now()
+                    ),
+                    str(destination): PLUGIN.FileInfo(
+                        source_stat.st_dev, source_stat.st_ino, datetime.now()
+                    ),
+                }
+
+                source.unlink()
+                plugin.handle_deleted(source)
+
+                self.assertTrue(destination.exists())
+                self.assertEqual(store.deleted, [])
+                self.assertEqual(plugin.deletion_queue, [])
+                self.assertEqual(self.events, [])
+
+    def test_source_path_that_is_also_a_destination_is_protected(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            source = root / "stage" / "episode.mkv"
+            destination = root / "media" / "episode.mkv"
+            source.parent.mkdir()
+            destination.parent.mkdir()
+            source.write_bytes(b"episode")
+            os.link(source, destination)
+            source_stat = source.lstat()
+            previous = _History(
+                1,
+                src=str(root / "original" / "episode.mkv"),
+                dest=str(source),
+                mode="move",
+            )
+            current = _History(2, src=str(source), dest=str(destination))
+            store = _HistoryStore(histories=[previous, current])
+            plugin = self.plugin()
+            plugin._delete_torrents = True
+            plugin._transferhistory = store
+            plugin.file_state = {
+                str(source): PLUGIN.FileInfo(
+                    source_stat.st_dev, source_stat.st_ino, datetime.now()
+                ),
+                str(destination): PLUGIN.FileInfo(
+                    source_stat.st_dev, source_stat.st_ino, datetime.now()
+                ),
+            }
+
+            source.unlink()
+            plugin.handle_deleted(source)
+
+            self.assertTrue(destination.exists())
+            self.assertEqual(plugin.deletion_queue, [])
+            self.assertEqual(store.deleted, [])
+            self.assertEqual(self.events, [])
+
+    def test_duplicate_destination_records_cancel_source_deletion(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            source = root / "downloads" / "episode.mkv"
+            destination = root / "media" / "episode.mkv"
+            source.parent.mkdir()
+            destination.parent.mkdir()
+            source.write_bytes(b"episode")
+            os.link(source, destination)
+            source_stat = source.lstat()
+            current = _History(1, src=str(source), dest=str(destination))
+            duplicate = _History(
+                2,
+                src=str(root / "other" / "episode.mkv"),
+                dest=str(destination),
+            )
+            store = _HistoryStore(histories=[current, duplicate])
+            plugin = self.plugin()
+            plugin._delete_torrents = True
+            plugin._transferhistory = store
+            plugin.file_state = {
+                str(source): PLUGIN.FileInfo(
+                    source_stat.st_dev, source_stat.st_ino, datetime.now()
+                ),
+                str(destination): PLUGIN.FileInfo(
+                    source_stat.st_dev, source_stat.st_ino, datetime.now()
+                ),
+            }
+
+            source.unlink()
+            plugin.handle_deleted(source)
+
+            self.assertTrue(destination.exists())
+            self.assertEqual(plugin.deletion_queue, [])
+            self.assertEqual(store.deleted, [])
+            self.assertEqual(self.events, [])
+
+    def test_verified_source_deletion_is_identical_in_immediate_and_delayed_modes(self):
+        for delayed in (False, True):
+            with self.subTest(delayed=delayed), tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp)
+                source = root / "downloads" / "episode.mkv"
+                destination = root / "media" / "episode.mkv"
+                source.parent.mkdir()
+                destination.parent.mkdir()
+                source.write_bytes(b"episode")
+                os.link(source, destination)
+                source_stat = source.lstat()
+                history = _History(
+                    7,
+                    src=str(source),
+                    dest=str(destination),
+                    download_hash="torrent-hash",
+                )
+                store = _HistoryStore(src=history, dest=history)
+                plugin = self.plugin()
+                plugin._delayed_deletion = delayed
+                plugin._delete_torrents = True
+                plugin._transferhistory = store
+                plugin.file_state = {
+                    str(source): PLUGIN.FileInfo(
+                        source_stat.st_dev, source_stat.st_ino, datetime.now()
+                    ),
+                    str(destination): PLUGIN.FileInfo(
+                        source_stat.st_dev, source_stat.st_ino, datetime.now()
+                    ),
+                }
+
+                source.unlink()
+                plugin.handle_deleted(source)
+                if delayed:
+                    self.assertEqual(len(plugin.deletion_queue), 1)
+                    plugin._execute_delayed_deletion(plugin.deletion_queue[0])
+
+                self.assertFalse(destination.exists())
+                self.assertEqual(store.deleted, [7])
+                self.assertEqual(
+                    self.events,
+                    [
+                        (
+                            _Dummy.DownloadFileDeleted,
+                            {"src": str(source), "hash": "torrent-hash"},
+                        )
+                    ],
+                )
+                self.events.clear()
+
+    def test_recreated_source_path_cancels_verified_deletion(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            source = root / "downloads" / "episode.mkv"
+            destination = root / "media" / "episode.mkv"
+            source.parent.mkdir()
+            destination.parent.mkdir()
+            source.write_bytes(b"old")
+            os.link(source, destination)
+            source_stat = source.lstat()
+            history = _History(7, src=str(source), dest=str(destination))
+            store = _HistoryStore(src=history, dest=history)
+            plugin = self.plugin()
+            plugin._delete_torrents = True
+            plugin._transferhistory = store
+            plugin.file_state = {
+                str(source): PLUGIN.FileInfo(
+                    source_stat.st_dev, source_stat.st_ino, datetime.now()
+                ),
+                str(destination): PLUGIN.FileInfo(
+                    source_stat.st_dev, source_stat.st_ino, datetime.now()
+                ),
+            }
+
+            source.unlink()
+            evidence = plugin._capture_source_deletion_evidence(source)
+            source.write_bytes(b"replacement")
+            result = plugin._execute_verified_source_deletion(
+                source,
+                source_stat.st_dev,
+                source_stat.st_ino,
+                evidence,
+                "立即删除",
+            )
+
+            self.assertEqual(result, ([], 0, False))
+            self.assertEqual(source.read_bytes(), b"replacement")
+            self.assertTrue(destination.exists())
+            self.assertEqual(store.deleted, [])
+            self.assertEqual(self.events, [])
+
+    def test_untracked_extra_hardlink_cancels_deletion(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            source = root / "downloads" / "episode.mkv"
+            destination = root / "media" / "episode.mkv"
+            hidden = root / "hidden" / "episode.mkv"
+            source.parent.mkdir()
+            destination.parent.mkdir()
+            hidden.parent.mkdir()
+            source.write_bytes(b"episode")
+            os.link(source, destination)
+            os.link(source, hidden)
+            source_stat = source.lstat()
+            history = _History(7, src=str(source), dest=str(destination))
+            store = _HistoryStore(src=history, dest=history)
+            plugin = self.plugin()
+            plugin._delete_torrents = True
+            plugin._transferhistory = store
+            plugin.file_state = {
+                str(source): PLUGIN.FileInfo(
+                    source_stat.st_dev, source_stat.st_ino, datetime.now()
+                ),
+                str(destination): PLUGIN.FileInfo(
+                    source_stat.st_dev, source_stat.st_ino, datetime.now()
+                ),
+            }
+
+            source.unlink()
+            plugin.handle_deleted(source)
+            plugin._execute_delayed_deletion(plugin.deletion_queue[0])
+
+            self.assertTrue(destination.exists())
+            self.assertTrue(hidden.exists())
+            self.assertEqual(store.deleted, [])
+            self.assertEqual(self.events, [])
+
+    def test_replaced_destination_inode_cancels_deletion(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            source = root / "downloads" / "episode.mkv"
+            destination = root / "media" / "episode.mkv"
+            source.parent.mkdir()
+            destination.parent.mkdir()
+            source.write_bytes(b"old")
+            os.link(source, destination)
+            source_stat = source.lstat()
+            history = _History(7, src=str(source), dest=str(destination))
+            store = _HistoryStore(src=history, dest=history)
+            plugin = self.plugin()
+            plugin._delete_torrents = True
+            plugin._transferhistory = store
+            plugin.file_state = {
+                str(source): PLUGIN.FileInfo(
+                    source_stat.st_dev, source_stat.st_ino, datetime.now()
+                ),
+                str(destination): PLUGIN.FileInfo(
+                    source_stat.st_dev, source_stat.st_ino, datetime.now()
+                ),
+            }
+
+            source.unlink()
+            plugin.handle_deleted(source)
+            destination.unlink()
+            destination.write_bytes(b"replacement")
+            plugin._execute_delayed_deletion(plugin.deletion_queue[0])
+
+            self.assertEqual(destination.read_bytes(), b"replacement")
+            self.assertEqual(store.deleted, [])
+            self.assertEqual(self.events, [])
+
+    def test_destination_replaced_after_validation_is_restored_not_deleted(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            source = root / "downloads" / "episode.mkv"
+            destination = root / "media" / "episode.mkv"
+            source.parent.mkdir()
+            destination.parent.mkdir()
+            source.write_bytes(b"old")
+            os.link(source, destination)
+            source_stat = source.lstat()
+            history = _History(7, src=str(source), dest=str(destination))
+            store = _HistoryStore(src=history, dest=history)
+            plugin = self.plugin()
+            plugin._delete_torrents = True
+            plugin._transferhistory = store
+            plugin.file_state = {
+                str(source): PLUGIN.FileInfo(
+                    source_stat.st_dev, source_stat.st_ino, datetime.now()
+                ),
+                str(destination): PLUGIN.FileInfo(
+                    source_stat.st_dev, source_stat.st_ino, datetime.now()
+                ),
+            }
+
+            source.unlink()
+            plugin.handle_deleted(source)
+            validate_destination = plugin._validated_link_destination
+
+            def replace_after_validation(evidence, deleted_dev, deleted_inode):
+                result = validate_destination(evidence, deleted_dev, deleted_inode)
+                destination.unlink()
+                destination.write_bytes(b"replacement")
+                return result
+
+            plugin._validated_link_destination = replace_after_validation
+            plugin._execute_delayed_deletion(plugin.deletion_queue[0])
+
+            self.assertEqual(destination.read_bytes(), b"replacement")
+            self.assertEqual(store.deleted, [])
+            self.assertEqual(self.events, [])
+            self.assertEqual(
+                list(destination.parent.glob("*.removelinkfix-recovered-*")), []
+            )
+
+    def test_record_change_after_file_validation_blocks_event_and_history_delete(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            source = root / "downloads" / "episode.mkv"
+            destination = root / "media" / "episode.mkv"
+            source.parent.mkdir()
+            destination.parent.mkdir()
+            source.write_bytes(b"old")
+            os.link(source, destination)
+            source_stat = source.lstat()
+            history = _History(7, src=str(source), dest=str(destination))
+            store = _HistoryStore(src=history, dest=history)
+            plugin = self.plugin()
+            plugin._delete_torrents = True
+            plugin._transferhistory = store
+            plugin.file_state = {
+                str(source): PLUGIN.FileInfo(
+                    source_stat.st_dev, source_stat.st_ino, datetime.now()
+                ),
+                str(destination): PLUGIN.FileInfo(
+                    source_stat.st_dev, source_stat.st_ino, datetime.now()
+                ),
+            }
+
+            source.unlink()
+            plugin.handle_deleted(source)
+            validate_destination = plugin._validated_link_destination
+
+            def change_record_after_validation(evidence, deleted_dev, deleted_inode):
+                result = validate_destination(evidence, deleted_dev, deleted_inode)
+                history.download_hash = "changed-hash"
+                return result
+
+            plugin._validated_link_destination = change_record_after_validation
+            plugin._execute_delayed_deletion(plugin.deletion_queue[0])
+
+            self.assertFalse(destination.exists())
+            self.assertEqual(store.deleted, [])
+            self.assertEqual(self.events, [])
+
+    def test_scrap_file_deletion_never_enters_media_queue(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            nfo = Path(tmp) / "episode.nfo"
+            nfo.write_text("metadata", encoding="utf-8")
+            nfo_stat = nfo.lstat()
+            plugin = self.plugin()
+            plugin._transferhistory = _HistoryStore()
+            plugin.file_state = {
+                str(nfo): PLUGIN.FileInfo(
+                    nfo_stat.st_dev, nfo_stat.st_ino, datetime.now()
+                )
+            }
+
+            nfo.unlink()
+            plugin.handle_deleted(nfo)
+
+            self.assertEqual(plugin.deletion_queue, [])
+            self.assertEqual(self.events, [])
+
+    def test_new_media_created_during_scrap_cleanup_is_preserved(self):
+        plugin = self.plugin()
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "library"
+            season = root / "show" / "Season 1"
+            season.mkdir(parents=True)
+            (season / "episode.nfo").write_text("metadata", encoding="utf-8")
+            plugin.monitor_dirs = str(root)
+            snapshot_entries = plugin._snapshot_scrap_entries
+
+            def snapshot_then_create(path):
+                snapshot = snapshot_entries(path)
+                (path / "new-episode.mkv").write_bytes(b"new")
+                return snapshot
+
+            plugin._snapshot_scrap_entries = snapshot_then_create
+
+            plugin.delete_empty_folders(season / "removed.mkv")
+
+            self.assertTrue((season / "new-episode.mkv").exists())
+            self.assertTrue(season.exists())
 
     def test_v2_repository_structure_and_metadata_are_synced(self):
         package = json.loads((ROOT / "package.v2.json").read_text(encoding="utf-8"))

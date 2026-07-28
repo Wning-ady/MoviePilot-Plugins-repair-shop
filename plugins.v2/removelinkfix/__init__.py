@@ -5,10 +5,11 @@ import shutil
 import threading
 import time
 import traceback
+import uuid
 from pathlib import Path
-from typing import List, Tuple, Dict, Any
+from typing import List, Tuple, Dict, Any, Optional
 from dataclasses import dataclass
-from datetime import datetime, timedelta
+from datetime import datetime
 from typing import NamedTuple
 
 from app.db.transferhistory_oper import TransferHistoryOper
@@ -91,6 +92,17 @@ class FileInfo(NamedTuple):
     add_time: datetime
 
 
+@dataclass(frozen=True)
+class DeletionEvidence:
+    """删除源文件时冻结的转移记录证据。"""
+
+    history_id: int
+    src: str
+    dest: str
+    mode: str
+    download_hash: Optional[str]
+
+
 @dataclass
 class DeletionTask:
     """延迟删除任务"""
@@ -100,6 +112,7 @@ class DeletionTask:
     deleted_inode: int
     deleted_add_time: datetime
     timestamp: datetime
+    evidence: Optional[DeletionEvidence] = None
     processed: bool = False
 
 
@@ -202,14 +215,8 @@ class FileMonitorHandler(FileSystemEventHandler):
     def on_deleted(self, event):
         file_path = Path(event.src_path)
         if event.is_directory:
-            # 单独处理文件夹删除触发删除种子
-            if self.sync._delete_torrents:
-                # 发送事件
-                logger.info(f"监测到删除文件夹：{file_path}")
-                # 文件夹删除发送 DownloadFileDeleted 事件
-                eventmanager.send_event(
-                    EventType.DownloadFileDeleted, {"src": str(file_path)}
-                )
+            # 目录事件没有源文件、转移记录和 inode 证据，不能据此删种。
+            logger.info(f"监测到删除文件夹：{file_path}，跳过文件联动删除")
             return
         if file_path.suffix in [".!qB", ".part", ".mp"]:
             return
@@ -287,11 +294,11 @@ class RemoveLinkFix(_PluginBase):
     # 插件名称
     plugin_name = "清理媒体文件（修复版）"
     # 插件描述
-    plugin_desc = "基于 DzAvril 清理媒体文件 2.16 的修复版，修复临时源路径、转移记录误报、Emby 缩略图残留及目录清理边界问题。"
+    plugin_desc = "安全清理硬链接媒体文件；目标删除不反向清理下载源，源删除须经转移记录与 inode 复核。"
     # 插件图标
     plugin_icon = "https://raw.githubusercontent.com/Wning-ady/MoviePilot-Plugins-repair-shop/main/icons/Ombi_A.png"
     # 插件版本
-    plugin_version = "2.17"
+    plugin_version = "2.18"
     # 插件作者
     plugin_author = "DzAvril,Wning-ady"
     # 作者主页
@@ -362,6 +369,8 @@ class RemoveLinkFix(_PluginBase):
     deletion_queue: List[DeletionTask] = []
     # 延迟删除定时器
     _deletion_timer = None
+    _stop_event = None
+    _lifecycle_lock = threading.Lock()
 
     @staticmethod
     def __choose_observer():
@@ -389,6 +398,10 @@ class RemoveLinkFix(_PluginBase):
 
     def init_plugin(self, config: dict = None):
         logger.info(f"初始化媒体文件清理插件")
+
+        # 先完整停止旧实例，防止旧任务读取新配置后继续执行。
+        self.stop_service()
+        self._stop_event = threading.Event()
         self._transferhistory = TransferHistoryOper()
         self._storagechain = StorageChain()
 
@@ -414,9 +427,6 @@ class RemoveLinkFix(_PluginBase):
                 self._delay_seconds = max(10, min(86400, int(delay_seconds)))
             except (TypeError, ValueError):
                 self._delay_seconds = 30
-
-        # 停止现有任务
-        self.stop_service()
 
         # 初始化延迟删除队列
         self.deletion_queue = []
@@ -807,7 +817,7 @@ class RemoveLinkFix(_PluginBase):
                                         "props": {
                                             "type": "warning",
                                             "variant": "tonal",
-                                            "text": "延迟删除功能：启用后，文件删除时不会立即删除硬链接，而是等待指定时间后再检查文件是否仍被删除。这可以防止媒体重整理导致的意外删除。",
+                                            "text": "延迟删除仅提供等待窗口。所有模式都会先验证唯一成功的硬链接源记录、目标路径、inode 和链接数；媒体库目标或目录删除不会反向删除下载源、种子和转移记录。",
                                         },
                                     }
                                 ],
@@ -826,7 +836,7 @@ class RemoveLinkFix(_PluginBase):
                                         "props": {
                                             "type": "info",
                                             "variant": "tonal",
-                                            "text": "硬链接监控：源目录和硬链接目录都需要添加到监控目录中；如需实现删除硬链接时不删除源文件，可把源文件目录配置到不删除目录中。",
+                                            "text": "硬链接监控：源目录和目标目录都需加入监控。只有已确认的下载源文件删除才会清理其精确目标；目标删除、失败记录、无记录和身份变化均跳过。",
                                         },
                                     }
                                 ],
@@ -977,7 +987,7 @@ class RemoveLinkFix(_PluginBase):
                                         "props": {
                                             "type": "warning",
                                             "variant": "tonal",
-                                            "text": "联动删除种子需安装插件[下载器助手]并打开监听源文件事件。清理刮削文件功能会删除相关的.nfo、.jpg等元数据文件，请谨慎开启。",
+                                            "text": "联动删除种子仅在成功硬链接源记录含下载 hash 且全部安全复核通过后发送一次。清理刮削文件会删除对应目标的 .nfo、.jpg 等元数据。",
                                         },
                                     }
                                 ],
@@ -1011,6 +1021,11 @@ class RemoveLinkFix(_PluginBase):
         """
         logger.debug("开始停止服务")
 
+        with self._lifecycle_lock:
+            stop_event = getattr(self, "_stop_event", None)
+            if stop_event:
+                stop_event.set()
+
         # 首先停止文件监控，防止新的删除事件
         if self._observer:
             for observer in self._observer:
@@ -1024,9 +1039,12 @@ class RemoveLinkFix(_PluginBase):
         logger.debug("文件监控已停止")
 
         # 停止延迟删除定时器
-        if self._deletion_timer:
+        timer = self._deletion_timer
+        if timer:
             try:
-                self._deletion_timer.cancel()
+                timer.cancel()
+                if timer is not threading.current_thread() and timer.is_alive():
+                    timer.join()
                 self._deletion_timer = None
                 logger.debug("延迟删除定时器已停止")
             except Exception as e:
@@ -1042,6 +1060,10 @@ class RemoveLinkFix(_PluginBase):
             )
 
         logger.debug("服务停止完成")
+
+    def _service_stopping(self) -> bool:
+        stop_event = getattr(self, "_stop_event", None)
+        return bool(stop_event and stop_event.is_set())
 
     @staticmethod
     def _normalize_config_path(config_path: str) -> str:
@@ -1124,21 +1146,30 @@ class RemoveLinkFix(_PluginBase):
             return True
         return any(name.endswith(extension) for extension in self._scrap_extensions())
 
-    def scrape_files_left(self, path):
-        """
-        检查path目录是否只包含刮削文件
-        """
-        # 检查path下是否有非刮削文件或非刮削目录
-        for file in path.iterdir():
+    def _snapshot_scrap_entries(
+        self, path: Path
+    ) -> Optional[List[Tuple[Path, int, int, bool]]]:
+        """快照目录中可清理的刮削项；出现其他内容时返回 None。"""
+        entries = []
+        for file in list(path.iterdir()):
             if file.is_symlink():
-                return False
-            if file.is_dir():
+                return None
+            try:
+                stat_info = file.lstat()
+            except (FileNotFoundError, OSError):
+                return None
+            is_directory = file.is_dir()
+            if is_directory:
                 if file.suffix.lower() not in self.SCRAP_DIR_SUFFIXES:
-                    return False
-                continue
-            if not self._is_scrap_file(file):
-                return False
-        return True
+                    return None
+            elif not self._is_scrap_file(file):
+                return None
+            entries.append((file, stat_info.st_dev, stat_info.st_ino, is_directory))
+        return entries
+
+    def scrape_files_left(self, path):
+        """检查 path 目录是否只包含刮削文件。"""
+        return self._snapshot_scrap_entries(Path(path)) is not None
 
     def delete_scrap_infos(self, path):
         """
@@ -1166,24 +1197,6 @@ class RemoveLinkFix(_PluginBase):
             logger.error(f"清理刮削文件发生错误：{str(e)}.")
         # 清理空目录
         self.delete_empty_folders(path)
-
-    def delete_history(self, path) -> bool:
-        """
-        清理path相关的转移记录
-        """
-        if not self._delete_history:
-            return False
-        # Download clients may rename a source into a temporary directory before
-        # deleting it. Fall back to the exact destination path of the hard link.
-        transfer_history = self._transferhistory.get_by_src(path)
-        if not transfer_history:
-            transfer_history = self._transferhistory.get_by_dest(path)
-        if transfer_history:
-            self._transferhistory.delete(transfer_history.id)
-            logger.info(f"删除转移记录：{transfer_history.id} - {path}")
-            return True
-        logger.debug(f"未找到转移记录：{path}")
-        return False
 
     def delete_empty_folders(self, path):
         """
@@ -1220,12 +1233,25 @@ class RemoveLinkFix(_PluginBase):
             ):
                 break
 
-            # 若目录下只剩刮削文件，则清空文件夹
+            # 只删除检查快照中的原有刮削项；检查后新增的媒体文件必须保留。
             try:
-                if self.scrape_files_left(parent_path):
-                    # 清除目录下所有文件
-                    for file in parent_path.iterdir():
-                        if file.is_dir():
+                scrap_entries = self._snapshot_scrap_entries(parent_path)
+                if scrap_entries is not None:
+                    for file, expected_dev, expected_inode, is_directory in scrap_entries:
+                        try:
+                            current_stat = file.lstat()
+                        except (FileNotFoundError, OSError):
+                            continue
+                        if (
+                            file.is_symlink()
+                            or current_stat.st_dev != expected_dev
+                            or current_stat.st_ino != expected_inode
+                        ):
+                            logger.warning(
+                                f"刮削项在清理期间已变化，停止清理目录：{file}"
+                            )
+                            break
+                        if is_directory:
                             shutil.rmtree(file)
                             logger.info(f"删除刮削目录：{file}")
                         else:
@@ -1252,7 +1278,14 @@ class RemoveLinkFix(_PluginBase):
             # 更新路径为父目录，准备下一轮检查
             path = parent_path
 
-    def _unlink_tracked_file(self, file: Path, state_key: str, action: str) -> bool:
+    def _unlink_tracked_file(
+        self,
+        file: Path,
+        state_key: str,
+        action: str,
+        expected_dev: int,
+        expected_inode: int,
+    ) -> bool:
         """
         删除 file_state 中记录的硬链接文件。
 
@@ -1265,18 +1298,62 @@ class RemoveLinkFix(_PluginBase):
             logger.debug(f"文件 {file} 在不删除目录中，跳过")
             return False
 
+        quarantine = file.with_name(
+            f".{file.name}.removelinkfix-{uuid.uuid4().hex}.tmp"
+        )
         try:
+            # 原子移走当前目录项，再核对移走的实体；路径被并发替换时不会直接删除替换文件。
+            file.rename(quarantine)
+            quarantine_stat = quarantine.lstat()
+            if (
+                quarantine.is_symlink()
+                or quarantine_stat.st_dev != expected_dev
+                or quarantine_stat.st_ino != expected_inode
+            ):
+                if not file.exists():
+                    quarantine.rename(file)
+                    logger.warning(f"目标文件在删除前已被替换，已恢复：{state_key}")
+                else:
+                    recovery_path = file.with_name(
+                        f"{file.name}.removelinkfix-recovered-{uuid.uuid4().hex}"
+                    )
+                    quarantine.rename(recovery_path)
+                    logger.error(
+                        f"目标文件在删除前已被替换，原文件已保留到：{recovery_path}"
+                    )
+                return False
+
+            if self._service_stopping():
+                if not file.exists():
+                    quarantine.rename(file)
+                else:
+                    recovery_path = file.with_name(
+                        f"{file.name}.removelinkfix-recovered-{uuid.uuid4().hex}"
+                    )
+                    quarantine.rename(recovery_path)
+                logger.warning(f"插件正在停止，已取消删除：{state_key}")
+                return False
+
             logger.info(f"{action}硬链接文件：{state_key}")
-            file.unlink()
+            quarantine.unlink()
         except FileNotFoundError:
             logger.warning(f"硬链接文件已不存在，清理过期监控记录：{state_key}")
             self.file_state.pop(state_key, None)
             return False
         except OSError as e:
             logger.error(f"删除硬链接文件失败：{state_key} - {e}")
+            if quarantine.exists() and not file.exists():
+                try:
+                    quarantine.rename(file)
+                except OSError as restore_error:
+                    logger.error(f"恢复隔离文件失败：{quarantine} - {restore_error}")
             return False
 
-        self.file_state.pop(state_key, None)
+        current_info = self.file_state.get(state_key)
+        if current_info and self._same_file_identity(
+            current_info, expected_dev, expected_inode
+        ):
+            self.file_state.pop(state_key, None)
         return True
 
     @staticmethod
@@ -1284,11 +1361,307 @@ class RemoveLinkFix(_PluginBase):
         """判断两个监控记录是否指向同一个本地文件实体。"""
         return file_info.dev == dev and file_info.inode == inode
 
+    def _exact_destination_histories(self, destination: str) -> Optional[List[Any]]:
+        """返回精确目标记录；查询能力缺失时返回 None 并保守跳过。"""
+        get_by_dest = getattr(self._transferhistory, "get_by_dest", None)
+        if not callable(get_by_dest):
+            logger.warning("当前 MoviePilot 缺少目标记录查询，跳过文件联动删除")
+            return None
+        if not get_by_dest(destination):
+            return []
+
+        # MoviePilot 的公开 get_by_dest() 只返回首条记录，而 get_by(dest=...)
+        # 底层不会单独按 dest 查询。使用短数据库会话最多读取两条来证明唯一性。
+        database = None
+        try:
+            from app.db import ScopedSession
+            from app.db.models.transferhistory import TransferHistory
+
+            database = ScopedSession()
+            return list(
+                database.query(TransferHistory)
+                .filter(TransferHistory.dest == destination)
+                .limit(2)
+                .all()
+            )
+        except Exception as error:
+            logger.warning(f"精确查询目标转移记录失败，跳过文件联动删除：{error}")
+            return None
+        finally:
+            if database is not None:
+                database.close()
+
+    def _capture_source_deletion_evidence(
+        self, file_path: Path
+    ) -> Optional[DeletionEvidence]:
+        """只为唯一、成功的硬链接源记录冻结删除证据。"""
+        if self._is_scrap_file(file_path):
+            logger.debug(f"刮削文件删除不参与媒体联动：{file_path}")
+            return None
+
+        list_success = getattr(self._transferhistory, "list_success_by_src", None)
+        if not callable(list_success):
+            logger.warning("当前 MoviePilot 缺少精确源记录查询，跳过文件联动删除")
+            return None
+
+        path_destination_histories = self._exact_destination_histories(str(file_path))
+        if path_destination_histories is None:
+            return None
+        if path_destination_histories:
+            logger.warning(
+                f"删除路径同时属于媒体库目标，保留下载源、种子和转移记录：{file_path}"
+            )
+            return None
+
+        source_histories = list_success(str(file_path)) or []
+        if len(source_histories) != 1:
+            logger.warning(
+                f"未找到唯一成功的源转移记录，跳过文件联动删除：{file_path}"
+            )
+            return None
+
+        history = source_histories[0]
+        if getattr(history, "status", None) is not True:
+            logger.warning(f"转移记录未成功，跳过文件联动删除：{file_path}")
+            return None
+        mode = str(getattr(history, "mode", "") or "").lower()
+        if mode != "link":
+            logger.warning(
+                f"转移模式不是硬链接，跳过文件联动删除：{file_path} ({mode or '-'})"
+            )
+            return None
+
+        source = str(getattr(history, "src", "") or "")
+        destination = str(getattr(history, "dest", "") or "")
+        if source != str(file_path) or not destination or source == destination:
+            logger.warning(f"转移记录路径不完整或角色冲突，跳过文件联动删除：{file_path}")
+            return None
+
+        destination_histories = self._exact_destination_histories(destination)
+        if (
+            destination_histories is None
+            or len(destination_histories) != 1
+            or getattr(destination_histories[0], "id", None)
+            != getattr(history, "id", None)
+        ):
+            logger.warning(f"目标路径记录不唯一，跳过文件联动删除：{destination}")
+            return None
+
+        return DeletionEvidence(
+            history_id=history.id,
+            src=source,
+            dest=destination,
+            mode=mode,
+            download_hash=getattr(history, "download_hash", None),
+        )
+
+    def _validated_deletion_history(self, evidence: DeletionEvidence):
+        """执行前复核冻结的转移记录仍未变化。"""
+        history = self._transferhistory.get(evidence.history_id)
+        if not history:
+            logger.warning(f"转移记录已不存在，取消文件联动删除：{evidence.history_id}")
+            return None
+        current_values = (
+            getattr(history, "status", None),
+            str(getattr(history, "mode", "") or "").lower(),
+            str(getattr(history, "src", "") or ""),
+            str(getattr(history, "dest", "") or ""),
+            getattr(history, "download_hash", None),
+        )
+        frozen_values = (
+            True,
+            evidence.mode,
+            evidence.src,
+            evidence.dest,
+            evidence.download_hash,
+        )
+        if current_values != frozen_values:
+            logger.warning(
+                f"转移记录在等待期间已变化，取消文件联动删除：{evidence.history_id}"
+            )
+            return None
+
+        current_sources = self._transferhistory.list_success_by_src(evidence.src) or []
+        current_destinations = self._exact_destination_histories(evidence.dest)
+        if (
+            len(current_sources) != 1
+            or getattr(current_sources[0], "id", None) != evidence.history_id
+            or current_destinations is None
+            or len(current_destinations) != 1
+            or getattr(current_destinations[0], "id", None) != evidence.history_id
+        ):
+            logger.warning(
+                f"源或目标记录不再唯一，取消文件联动删除：{evidence.history_id}"
+            )
+            return None
+        return history
+
+    def _validated_link_destination(
+        self, evidence: DeletionEvidence, deleted_dev: int, deleted_inode: int
+    ) -> Optional[Path]:
+        """确认记录目标仍是唯一可解释的剩余硬链接。"""
+        destination = Path(evidence.dest)
+        destination_info = self.file_state.get(str(destination))
+        if (
+            not destination_info
+            or not self._same_file_identity(
+                destination_info, deleted_dev, deleted_inode
+            )
+            or self.__is_excluded(destination)
+            or destination.is_symlink()
+        ):
+            logger.warning(f"目标文件缺少可信监控证据，取消联动删除：{destination}")
+            return None
+
+        try:
+            destination_stat = destination.lstat()
+        except (FileNotFoundError, OSError) as error:
+            logger.warning(f"目标文件状态不可用，取消联动删除：{destination} - {error}")
+            return None
+        if (
+            destination_stat.st_dev != deleted_dev
+            or destination_stat.st_ino != deleted_inode
+        ):
+            logger.warning(f"目标文件实体已变化，取消联动删除：{destination}")
+            return None
+
+        matching_paths = []
+        for state_path, file_info in self.file_state.items():
+            if not self._same_file_identity(file_info, deleted_dev, deleted_inode):
+                continue
+            candidate = Path(state_path)
+            try:
+                candidate_stat = candidate.lstat()
+            except (FileNotFoundError, OSError):
+                continue
+            if (
+                not candidate.is_symlink()
+                and candidate_stat.st_dev == deleted_dev
+                and candidate_stat.st_ino == deleted_inode
+            ):
+                matching_paths.append(str(candidate))
+
+        if matching_paths != [str(destination)] or destination_stat.st_nlink != 1:
+            logger.warning(
+                f"存在未解释的额外硬链接，取消联动删除：{destination} "
+                f"(监控 {len(matching_paths)}，链接 {destination_stat.st_nlink})"
+            )
+            return None
+        return destination
+
+    def _execute_verified_source_deletion(
+        self,
+        file_path: Path,
+        deleted_dev: int,
+        deleted_inode: int,
+        evidence: Optional[DeletionEvidence],
+        action: str,
+    ) -> Tuple[List[str], int, bool]:
+        """基于冻结证据执行一次精确的源到目标联动。"""
+        if not evidence or self._service_stopping():
+            return [], 0, False
+        if str(file_path) != evidence.src:
+            logger.warning(f"删除任务源路径与冻结证据不一致，取消联动：{file_path}")
+            return [], 0, False
+        if os.path.lexists(file_path):
+            logger.info(f"源路径已重新出现，取消文件联动删除：{file_path}")
+            return [], 0, False
+
+        history = self._validated_deletion_history(evidence)
+        if not history:
+            return [], 0, False
+        with state_lock:
+            if self._service_stopping():
+                return [], 0, False
+            destination = self._validated_link_destination(
+                evidence, deleted_dev, deleted_inode
+            )
+            if not destination:
+                return [], 0, False
+            if not self._unlink_tracked_file(
+                destination,
+                str(destination),
+                action,
+                deleted_dev,
+                deleted_inode,
+            ):
+                return [], 0, False
+
+        self.delete_scrap_infos(destination)
+
+        # 文件系统操作后再次复核记录，防止整理线程在校验与删除间改变语义。
+        history = self._validated_deletion_history(evidence)
+        if not history or self._service_stopping():
+            return [str(destination)], 0, False
+
+        torrent_event_sent = False
+        history_deleted_count = 0
+        with self._lifecycle_lock:
+            if self._service_stopping():
+                return [str(destination)], 0, False
+            if self._delete_torrents:
+                if evidence.download_hash:
+                    eventmanager.send_event(
+                        EventType.DownloadFileDeleted,
+                        {"src": evidence.src, "hash": evidence.download_hash},
+                    )
+                    torrent_event_sent = True
+                else:
+                    logger.warning(
+                        f"转移记录缺少下载 hash，跳过种子联动：{evidence.history_id}"
+                    )
+
+            if self._delete_history:
+                history = self._validated_deletion_history(evidence)
+                if history:
+                    self._transferhistory.delete(history.id)
+                    history_deleted_count = 1
+                    logger.info(f"删除转移记录：{history.id} - {evidence.src}")
+
+        return [str(destination)], history_deleted_count, torrent_event_sent
+
+    def _notify_hardlink_deletion(
+        self,
+        source: Path,
+        deleted_files: List[str],
+        history_deleted_count: int,
+        torrent_event_sent: bool,
+        delayed: bool,
+    ):
+        if self._service_stopping() or not self._notify or not deleted_files:
+            return
+
+        notification_parts = [f"🗂️ 源文件：{source}"]
+        if len(deleted_files) == 1:
+            notification_parts.append(f"🔗 硬链接：{deleted_files[0]}")
+        else:
+            notification_parts.append(f"🔗 删除了 {len(deleted_files)} 个硬链接文件")
+        if self._delete_history:
+            if history_deleted_count:
+                notification_parts.append(
+                    f"📝 已清理转移记录（{history_deleted_count} 条）"
+                )
+            else:
+                notification_parts.append("📝 未清理转移记录")
+        if torrent_event_sent:
+            notification_parts.append("🌱 已发送种子联动删除事件")
+        if self._delete_scrap_infos:
+            notification_parts.append("🖼️ 已执行刮削文件清理")
+
+        mode_text = "⏰ 延迟删除完成" if delayed else "⚡ 立即删除完成"
+        self.post_message(
+            mtype=NotificationType.SiteMessage,
+            title="🧹 媒体文件清理",
+            text=f"{mode_text}\n\n" + "\n".join(notification_parts),
+        )
+
     def _execute_delayed_deletion(self, task: DeletionTask):
         """
         执行延迟删除任务
         """
         try:
+            if self._service_stopping():
+                return
             logger.debug(f"开始执行延迟删除任务: {task.file_path}")
 
             # 验证原文件是否仍然被删除（未被重新创建）
@@ -1296,107 +1669,24 @@ class RemoveLinkFix(_PluginBase):
                 logger.info(f"文件 {task.file_path} 已被重新创建，跳过删除操作")
                 return
 
-            # 检查是否有相同inode的新文件（重新硬链接的情况）
-            with state_lock:
-                for path, file_info in self.file_state.items():
-                    if self._same_file_identity(
-                        file_info, task.deleted_dev, task.deleted_inode
-                    ) and path != str(task.file_path):
-                        # 重整/改名会在删除旧硬链接的前后创建同 inode 的新路径。
-                        # 但下载源文件通常早于媒体库硬链接创建；仅比较两个加入监控
-                        # 的时间会把“下载器删除源文件”误判为重新硬链接，导致媒体库
-                        # 硬链接永远不清理（#54/#55）。候选路径必须在删除事件附近
-                        # 才能作为重新整理的替代文件保留。事件到达可能乱序，因此接受
-                        # 删除事件之前一个延迟窗口内创建、或删除事件之后才创建的路径。
-                        rehardlink_window = timedelta(
-                            seconds=max(5, self._delay_seconds)
-                        )
-                        is_recent_rehardlink = (
-                            file_info.add_time >= task.timestamp - rehardlink_window
-                        )
-                        if (
-                            file_info.add_time > task.deleted_add_time
-                            and is_recent_rehardlink
-                        ):
-                            logger.info(
-                                f"检测到相同文件实体的新文件 {path}，添加时间 {file_info.add_time} 接近删除事件 {task.timestamp}，可能是重新硬链接，跳过硬链接删除"
-                            )
-                            # 重新整理/重命名会生成新的媒体硬链接，但旧文件名对应的
-                            # nfo、jpg、trickplay 等刮削文件不会自动消失。此时只清理
-                            # 被删除旧路径同名的刮削文件，不能删除新硬链接、转移记录或种子。
-                            self.delete_scrap_infos(task.file_path)
-                            return
-
-            # 延迟执行所有删除相关操作
-            logger.debug(
-                f"文件 {task.file_path} 确认被删除且无重新硬链接，开始执行延迟删除操作"
+            (
+                deleted_files,
+                history_deleted_count,
+                torrent_event_sent,
+            ) = self._execute_verified_source_deletion(
+                file_path=task.file_path,
+                deleted_dev=task.deleted_dev,
+                deleted_inode=task.deleted_inode,
+                evidence=task.evidence,
+                action="延迟删除",
             )
-
-            # 清理刮削文件
-            self.delete_scrap_infos(task.file_path)
-            if self._delete_torrents:
-                # 只有非刮削文件才发送 DownloadFileDeleted 事件
-                if not self._is_scrap_file(task.file_path):
-                    eventmanager.send_event(
-                        EventType.DownloadFileDeleted, {"src": str(task.file_path)}
-                    )
-            # 删除转移记录
-            history_deleted_count = int(self.delete_history(str(task.file_path)))
-
-            # 查找并删除硬链接文件
-            deleted_files = []
-
-            with state_lock:
-                for path, file_info in self.file_state.copy().items():
-                    if self._same_file_identity(
-                        file_info, task.deleted_dev, task.deleted_inode
-                    ):
-                        file = Path(path)
-                        if not self._unlink_tracked_file(file, path, "延迟删除"):
-                            continue
-                        deleted_files.append(path)
-
-                        # 清理硬链接文件相关的刮削文件
-                        self.delete_scrap_infos(file)
-                        if self._delete_torrents:
-                            # 只有非刮削文件才发送 DownloadFileDeleted 事件
-                            if not self._is_scrap_file(file):
-                                eventmanager.send_event(
-                                    EventType.DownloadFileDeleted, {"src": str(file)}
-                                )
-                        # 删除硬链接文件的转移记录
-                        history_deleted_count += int(self.delete_history(str(file)))
-
-            # 发送通知（在锁外执行）
-            if self._notify and deleted_files:
-                file_count = len(deleted_files)
-
-                # 构建通知内容
-                notification_parts = [f"🗂️ 源文件：{task.file_path}"]
-
-                if file_count == 1:
-                    notification_parts.append(f"🔗 硬链接：{deleted_files[0]}")
-                else:
-                    notification_parts.append(f"🔗 删除了 {file_count} 个硬链接文件")
-
-                # 添加其他操作记录
-                if self._delete_history:
-                    if history_deleted_count:
-                        notification_parts.append(
-                            f"📝 已清理转移记录（{history_deleted_count} 条）"
-                        )
-                    else:
-                        notification_parts.append("📝 未找到匹配的转移记录")
-                if self._delete_torrents:
-                    notification_parts.append("🌱 已发送种子联动删除事件")
-                if self._delete_scrap_infos:
-                    notification_parts.append("🖼️ 已执行刮削文件清理")
-
-                self.post_message(
-                    mtype=NotificationType.SiteMessage,
-                    title="🧹 媒体文件清理",
-                    text=f"⏰ 延迟删除完成\n\n" + "\n".join(notification_parts),
-                )
+            self._notify_hardlink_deletion(
+                source=task.file_path,
+                deleted_files=deleted_files,
+                history_deleted_count=history_deleted_count,
+                torrent_event_sent=torrent_event_sent,
+                delayed=True,
+            )
 
         except Exception as e:
             logger.error(f"执行延迟删除任务失败：{str(e)} - {traceback.format_exc()}")
@@ -1408,6 +1698,8 @@ class RemoveLinkFix(_PluginBase):
         处理延迟删除队列
         """
         try:
+            if self._service_stopping():
+                return
             current_time = datetime.now()
             tasks_to_process = []
 
@@ -1428,6 +1720,8 @@ class RemoveLinkFix(_PluginBase):
             # 在锁外处理任务，避免死锁
             processed_count = 0
             for task in tasks_to_process:
+                if self._service_stopping():
+                    break
                 try:
                     self._execute_delayed_deletion(task)
                     processed_count += 1
@@ -1447,7 +1741,7 @@ class RemoveLinkFix(_PluginBase):
                     logger.debug(f"清理了 {cleaned_count} 个已处理的任务")
 
                 # 如果还有未处理的任务，重新启动定时器
-                if self.deletion_queue:
+                if self.deletion_queue and not self._service_stopping():
                     # 计算下一个任务的等待时间
                     next_task_time = min(
                         (task.timestamp.timestamp() + self._delay_seconds)
@@ -1476,6 +1770,8 @@ class RemoveLinkFix(_PluginBase):
         启动延迟删除定时器
         注意：此方法假设调用前已检查没有运行中的定时器
         """
+        if self._service_stopping():
+            return
         if delay_time is None:
             delay_time = self._delay_seconds
 
@@ -1488,119 +1784,63 @@ class RemoveLinkFix(_PluginBase):
         处理删除事件
         """
         logger.debug(f"处理删除事件: {file_path}")
+        if self._service_stopping():
+            return
 
-        # 删除的文件对应的监控信息
         with state_lock:
-            # 删除的文件信息
-            file_info = self.file_state.get(str(file_path))
+            file_info = self.file_state.pop(str(file_path), None)
             if not file_info:
                 logger.debug(f"文件 {file_path} 未在监控列表中，跳过处理")
                 return
-            else:
-                deleted_inode = file_info.inode
-                deleted_dev = file_info.dev
-                deleted_add_time = file_info.add_time
-                self.file_state.pop(str(file_path))
 
-            # 根据配置选择立即删除或延迟删除
-            if self._delayed_deletion:
-                # 延迟删除模式 - 所有删除操作都延迟执行
-                logger.info(
-                    f"文件 {file_path.name} 加入延迟删除队列，延迟 {self._delay_seconds} 秒"
-                )
-                task = DeletionTask(
-                    file_path=file_path,
-                    deleted_dev=deleted_dev,
-                    deleted_inode=deleted_inode,
-                    deleted_add_time=deleted_add_time,
-                    timestamp=datetime.now(),
-                )
+        evidence = self._capture_source_deletion_evidence(file_path)
+        if not evidence:
+            return
 
-                with deletion_queue_lock:
-                    self.deletion_queue.append(task)
-                    # 只有在没有定时器运行时才启动新的定时器
-                    # 避免频繁的删除事件重置定时器导致任务永远不被处理
-                    if not self._deletion_timer:
-                        self._start_deletion_timer()
-                        logger.debug("启动延迟删除定时器")
-                    else:
-                        logger.debug("延迟删除定时器已在运行，任务已加入队列")
-            else:
-                # 立即删除模式（原有逻辑）
-                deleted_files = []
+        if self._delayed_deletion:
+            logger.info(
+                f"源文件 {file_path.name} 加入安全延迟删除队列，延迟 {self._delay_seconds} 秒"
+            )
+            task = DeletionTask(
+                file_path=file_path,
+                deleted_dev=file_info.dev,
+                deleted_inode=file_info.inode,
+                deleted_add_time=file_info.add_time,
+                timestamp=datetime.now(),
+                evidence=evidence,
+            )
+            with deletion_queue_lock:
+                self.deletion_queue.append(task)
+                if not self._deletion_timer:
+                    self._start_deletion_timer()
+                    logger.debug("启动延迟删除定时器")
+                else:
+                    logger.debug("延迟删除定时器已在运行，任务已加入队列")
+            return
 
-                # 清理刮削文件
-                self.delete_scrap_infos(file_path)
-                if self._delete_torrents:
-                    # 只有非刮削文件才发送 DownloadFileDeleted 事件
-                    if not self._is_scrap_file(file_path):
-                        eventmanager.send_event(
-                            EventType.DownloadFileDeleted, {"src": str(file_path)}
-                        )
-                # 删除转移记录
-                history_deleted_count = int(self.delete_history(str(file_path)))
-
-                try:
-                    # 在file_state中查找与deleted_inode有相同inode的文件并删除
-                    for path, file_info in self.file_state.copy().items():
-                        if self._same_file_identity(
-                            file_info, deleted_dev, deleted_inode
-                        ):
-                            file = Path(path)
-                            if not self._unlink_tracked_file(file, path, "立即删除"):
-                                continue
-                            deleted_files.append(path)
-
-                            # 清理刮削文件
-                            self.delete_scrap_infos(file)
-                            if self._delete_torrents:
-                                # 只有非刮削文件才发送 DownloadFileDeleted 事件
-                                if not self._is_scrap_file(file):
-                                    eventmanager.send_event(
-                                        EventType.DownloadFileDeleted,
-                                        {"src": str(file)},
-                                    )
-                            # 删除转移记录
-                            history_deleted_count += int(self.delete_history(str(file)))
-
-                    # 发送通知
-                    if self._notify and deleted_files:
-                        file_count = len(deleted_files)
-
-                        # 构建通知内容
-                        notification_parts = [f"🗂️ 源文件：{file_path}"]
-
-                        if file_count == 1:
-                            notification_parts.append(f"🔗 硬链接：{deleted_files[0]}")
-                        else:
-                            notification_parts.append(
-                                f"🔗 删除了 {file_count} 个硬链接文件"
-                            )
-
-                        # 添加其他操作记录
-                        if self._delete_history:
-                            if history_deleted_count:
-                                notification_parts.append(
-                                    f"📝 已清理转移记录（{history_deleted_count} 条）"
-                                )
-                            else:
-                                notification_parts.append("📝 未找到匹配的转移记录")
-                        if self._delete_torrents:
-                            notification_parts.append("🌱 已发送种子联动删除事件")
-                        if self._delete_scrap_infos:
-                            notification_parts.append("🖼️ 已执行刮削文件清理")
-
-                        self.post_message(
-                            mtype=NotificationType.SiteMessage,
-                            title="🧹 媒体文件清理",
-                            text=f"⚡ 立即删除完成\n\n" + "\n".join(notification_parts),
-                        )
-
-                except Exception as e:
-                    logger.error(
-                        "删除硬链接文件发生错误：%s - %s"
-                        % (str(e), traceback.format_exc())
-                    )
+        try:
+            (
+                deleted_files,
+                history_deleted_count,
+                torrent_event_sent,
+            ) = self._execute_verified_source_deletion(
+                file_path=file_path,
+                deleted_dev=file_info.dev,
+                deleted_inode=file_info.inode,
+                evidence=evidence,
+                action="立即删除",
+            )
+            self._notify_hardlink_deletion(
+                source=file_path,
+                deleted_files=deleted_files,
+                history_deleted_count=history_deleted_count,
+                torrent_event_sent=torrent_event_sent,
+                delayed=False,
+            )
+        except Exception as error:
+            logger.error(
+                f"安全联动删除发生错误：{error} - {traceback.format_exc()}"
+            )
 
     def _parse_strm_path_mappings(self) -> Dict[str, Tuple[str, str]]:
         """

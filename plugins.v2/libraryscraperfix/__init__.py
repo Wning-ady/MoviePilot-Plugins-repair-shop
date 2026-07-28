@@ -136,7 +136,7 @@ class LibraryScraperFix(_PluginBase):
         "https://raw.githubusercontent.com/Wning-ady/"
         "MoviePilot-Plugins-repair-shop/main/icons/Ombi_A.png"
     )
-    plugin_version = "1.1.1"
+    plugin_version = "1.1.2"
     plugin_author = "jxxghp,Wning-ady"
     author_url = "https://github.com/Wning-ady/MoviePilot-Plugins-repair-shop"
     plugin_config_prefix = "libraryscraperfix_"
@@ -150,6 +150,7 @@ class LibraryScraperFix(_PluginBase):
     _nfo_repair_state_key = "nfo_repair_state_v1"
     _last_run_key = "last_run"
     _history_key = "run_history"
+    _detail_limit = 200
     _run_lock = threading.Lock()
 
     _scheduler: Optional[BackgroundScheduler] = None
@@ -416,7 +417,7 @@ class LibraryScraperFix(_PluginBase):
                     alert_type = "warning"
                 else:
                     alert_type = "success"
-        return [
+        page = [
             {
                 "component": "VAlert",
                 "props": {
@@ -426,6 +427,14 @@ class LibraryScraperFix(_PluginBase):
                 },
             }
         ]
+        if not running_status and last_run:
+            details = last_run.get("details") or []
+            failures = last_run.get("failures") or []
+            if details:
+                page.append(self._details_panel(details))
+            if failures:
+                page.append(self._failures_panel(failures))
+        return page
 
     def run(self, progress_callback=None):
         if not self._run_lock.acquire(blocking=False):
@@ -474,6 +483,12 @@ class LibraryScraperFix(_PluginBase):
 
             if self._max_targets and len(candidates) > self._max_targets:
                 summary["deferred"] = len(candidates) - self._max_targets
+                for target in candidates[self._max_targets :]:
+                    self._record_target_detail(
+                        summary,
+                        target,
+                        ScrapeOutcome(status="deferred", detail="超过单次处理目标上限"),
+                    )
                 candidates = candidates[: self._max_targets]
 
             total = len(candidates)
@@ -1449,8 +1464,30 @@ class LibraryScraperFix(_PluginBase):
         summary["scraped_files"] += outcome.scraped_files
         summary["unrecognized_files"] += outcome.unrecognized_files
         summary["failed_files"] += outcome.failed_files
+        self._record_target_detail(summary, target, outcome)
         if outcome.detail:
             self._remember_failure(summary, str(target.path), outcome.detail)
+
+    @classmethod
+    def _record_target_detail(
+        cls, summary: Dict[str, Any], target: ScrapeTarget, outcome: ScrapeOutcome
+    ) -> None:
+        details = summary.setdefault("details", [])
+        if len(details) >= cls._detail_limit:
+            return
+        detail = outcome.detail
+        if not detail and outcome.status == "unrecognized":
+            detail = "未识别到媒体信息"
+        elif not detail and outcome.status == "partial":
+            detail = "部分媒体文件未完成"
+        details.append(
+            {
+                "status": outcome.status,
+                "path": str(target.path),
+                "files": target.file_count,
+                "detail": detail[:500] if detail else "",
+            }
+        )
 
     def _save_run_summary(self, summary: Dict[str, Any]) -> None:
         try:
@@ -1485,6 +1522,131 @@ class LibraryScraperFix(_PluginBase):
         failures = summary.setdefault("failures", [])
         if len(failures) < 20:
             failures.append({"path": path, "detail": detail[:500]})
+
+    @staticmethod
+    def _details_panel(details: List[Dict[str, Any]]) -> dict:
+        status_labels = {
+            "success": "成功",
+            "partial": "部分完成",
+            "dry_run": "预演",
+            "unrecognized": "未识别",
+            "failed": "失败",
+            "deferred": "延后",
+            "cancelled": "已取消",
+        }
+        rows = []
+        for item in details:
+            status = item.get("status", "")
+            rows.append(
+                {
+                    "component": "tr",
+                    "content": [
+                        {"component": "td", "text": status_labels.get(status, status)},
+                        {
+                            "component": "td",
+                            "props": {"class": "text-break"},
+                            "text": item.get("path", ""),
+                        },
+                        {"component": "td", "text": str(item.get("files", 0))},
+                        {
+                            "component": "td",
+                            "props": {"class": "text-break"},
+                            "text": item.get("detail", ""),
+                        },
+                    ],
+                }
+            )
+        return {
+            "component": "VExpansionPanels",
+            "props": {"variant": "accordion", "multiple": True},
+            "content": [
+                {
+                    "component": "VExpansionPanel",
+                    "content": [
+                        {
+                            "component": "VExpansionPanelTitle",
+                            "text": f"最近运行目标明细（{len(details)} 条）",
+                        },
+                        {
+                            "component": "VExpansionPanelText",
+                            "content": [
+                                {
+                                    "component": "VTable",
+                                    "props": {"density": "compact", "hover": True},
+                                    "content": [
+                                        {
+                                            "component": "thead",
+                                            "content": [
+                                                {"component": "th", "text": "结果"},
+                                                {"component": "th", "text": "目标"},
+                                                {"component": "th", "text": "文件"},
+                                                {"component": "th", "text": "说明"},
+                                            ],
+                                        },
+                                        {"component": "tbody", "content": rows},
+                                    ],
+                                }
+                            ],
+                        },
+                    ],
+                }
+            ],
+        }
+
+    @staticmethod
+    def _failures_panel(failures: List[Dict[str, Any]]) -> dict:
+        rows = [
+            {
+                "component": "tr",
+                "content": [
+                    {
+                        "component": "td",
+                        "props": {"class": "text-break"},
+                        "text": item.get("path", ""),
+                    },
+                    {
+                        "component": "td",
+                        "props": {"class": "text-break"},
+                        "text": item.get("detail", ""),
+                    },
+                ],
+            }
+            for item in failures
+        ]
+        return {
+            "component": "VExpansionPanels",
+            "props": {"variant": "accordion", "multiple": True},
+            "content": [
+                {
+                    "component": "VExpansionPanel",
+                    "content": [
+                        {
+                            "component": "VExpansionPanelTitle",
+                            "text": f"最近运行问题（{len(failures)} 条）",
+                        },
+                        {
+                            "component": "VExpansionPanelText",
+                            "content": [
+                                {
+                                    "component": "VTable",
+                                    "props": {"density": "compact", "hover": True},
+                                    "content": [
+                                        {
+                                            "component": "thead",
+                                            "content": [
+                                                {"component": "th", "text": "路径"},
+                                                {"component": "th", "text": "问题"},
+                                            ],
+                                        },
+                                        {"component": "tbody", "content": rows},
+                                    ],
+                                }
+                            ],
+                        },
+                    ],
+                }
+            ],
+        }
 
     @staticmethod
     def _progress(callback, value: int, text: str, summary: Dict[str, Any]) -> None:
@@ -1650,6 +1812,7 @@ class LibraryScraperFix(_PluginBase):
             "nfo_titles_updated": 0,
             "nfo_overviews_updated": 0,
             "failures": [],
+            "details": [],
         }
         return summary
 

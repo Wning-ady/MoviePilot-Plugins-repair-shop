@@ -1161,6 +1161,26 @@ class LibraryScraperFixTests(unittest.TestCase):
 
             self.assertEqual(PLUGIN.ET.parse(nfo).getroot().findtext("title"), "真相浮现")
             self.assertEqual(plugin._active_summary["nfo_titles_updated"], 1)
+            changes = plugin._active_summary["nfo_changes"]
+            self.assertEqual(len(changes), 1)
+            self.assertEqual(changes[0]["status"], "updated")
+            self.assertEqual(changes[0]["path"], str(nfo))
+            self.assertEqual(
+                changes[0]["fields"],
+                [
+                    {"field": "title", "before": "第 15 集", "after": "真相浮现"},
+                    {
+                        "field": "plot",
+                        "before": "",
+                        "after": "这是 TMDB 提供的剧情简介。",
+                    },
+                    {
+                        "field": "outline",
+                        "before": "",
+                        "after": "这是 TMDB 提供的剧情简介。",
+                    },
+                ],
+            )
 
     def test_nfo_repair_preserves_specific_title_and_generic_tmdb_title(self):
         plugin = self.plugin()
@@ -1199,6 +1219,117 @@ class LibraryScraperFixTests(unittest.TestCase):
             self.assertEqual(nfo.read_bytes(), original)
             self.assertEqual(plugin._nfo_repair_state, {})
             self.assertEqual(plugin._active_summary["nfo_preview"], 1)
+            self.assertEqual(plugin._active_summary["nfo_changes"][0]["status"], "dry_run")
+            self.assertEqual(
+                [field["field"] for field in plugin._active_summary["nfo_changes"][0]["fields"]],
+                ["title", "plot", "outline"],
+            )
+
+    def test_nfo_repair_write_failure_does_not_record_change(self):
+        plugin = self.plugin()
+        with tempfile.TemporaryDirectory() as tmp:
+            media = Path(tmp) / "Show.S01E15.mkv"
+            media.touch()
+            nfo = self._repairable_episode(plugin, media)
+            original = nfo.read_bytes()
+            mediainfo = types.SimpleNamespace(tmdb_id=289139, episode_group=None)
+
+            with (
+                mock.patch.object(PLUGIN, "MetaInfoPath", self._episode_meta),
+                mock.patch.object(PLUGIN.os, "replace", side_effect=OSError("disk full")),
+            ):
+                plugin._repair_nfo_target(media, _MediaType.TV, plugin._target_file, mediainfo)
+
+            self.assertEqual(nfo.read_bytes(), original)
+            self.assertEqual(plugin._active_summary["nfo_updated"], 0)
+            self.assertEqual(plugin._active_summary["nfo_changes"], [])
+
+    def test_nfo_changes_panel_paginates_field_rows(self):
+        plugin = self.plugin()
+        summary = plugin._new_summary(plugin._now())
+        summary["nfo_changes"] = [
+            {
+                "status": "updated",
+                "path": f"/media/Show/episode-{number:02d}.nfo",
+                "media_path": f"/media/Show/episode-{number:02d}.mkv",
+                "fields": [
+                    {"field": "plot", "before": "", "after": f"剧情 {number}"}
+                ],
+            }
+            for number in range(1, 22)
+        ]
+
+        panel = plugin._nfo_changes_panel(summary)
+
+        self.assertEqual(panel["component"], "VSheet")
+        self.assertEqual(panel["content"][0]["text"], "NFO 实际变更（21 个文件 / 21 个字段）")
+        pages = panel["content"][2]["content"]
+        self.assertEqual(len(pages), 2)
+        self.assertEqual(
+            pages[0]["content"][0]["text"], "第 1 页（1-20 / 21 条字段变更）"
+        )
+        self.assertEqual(
+            pages[1]["content"][0]["text"], "第 2 页（21-21 / 21 条字段变更）"
+        )
+        self.assertEqual(len(pages[0]["content"][1]["content"][0]["content"][1]["content"]), 20)
+        last_row = pages[1]["content"][1]["content"][0]["content"][1]["content"][0]
+        self.assertEqual(last_row["content"][0]["text"], "/media/Show/episode-21.nfo")
+
+    def test_nfo_changes_panel_explains_old_run_records(self):
+        plugin = self.plugin()
+        summary = plugin._new_summary(plugin._now())
+        del summary["nfo_changes"]
+        summary["nfo_updated"] = 1
+
+        panel = plugin._nfo_changes_panel(summary)
+
+        self.assertEqual(panel["component"], "VAlert")
+        self.assertIn("未保存字段级变更", panel["props"]["text"])
+
+    def test_nfo_changes_panel_reports_saved_detail_limit(self):
+        plugin = self.plugin()
+        summary = plugin._new_summary(plugin._now())
+        fields = [{"field": "plot", "before": "", "after": "剧情"}]
+
+        with mock.patch.object(type(plugin), "_nfo_change_detail_limit", 1):
+            plugin._record_nfo_change(
+                summary,
+                Path("/media/Show/episode-01.nfo"),
+                Path("/media/Show/episode-01.mkv"),
+                "updated",
+                fields,
+            )
+            plugin._record_nfo_change(
+                summary,
+                Path("/media/Show/episode-02.nfo"),
+                Path("/media/Show/episode-02.mkv"),
+                "updated",
+                fields,
+            )
+
+        panel = plugin._nfo_changes_panel(summary)
+
+        self.assertEqual(summary["nfo_changes_total"], 2)
+        self.assertEqual(summary["nfo_changes_truncated"], 1)
+        self.assertIn("本轮 2 个文件", panel["content"][0]["text"])
+        self.assertIn("另有 1 个文件", panel["content"][1]["props"]["text"])
+
+    def test_nfo_changes_panel_reports_truncated_field_text(self):
+        plugin = self.plugin()
+        summary = plugin._new_summary(plugin._now())
+
+        with mock.patch.object(type(plugin), "_nfo_change_text_limit", 10):
+            plugin._record_nfo_change(
+                summary,
+                Path("/media/Show/episode-01.nfo"),
+                Path("/media/Show/episode-01.mkv"),
+                "updated",
+                [{"field": "plot", "before": "", "after": "这是一段超过十个字符的剧情简介。"}],
+            )
+            panel = plugin._nfo_changes_panel(summary)
+
+        self.assertEqual(summary["nfo_change_text_truncated"], 1)
+        self.assertIn("超过 10 个字符", panel["content"][1]["props"]["text"])
 
     def test_nfo_repair_cache_rechecks_changed_or_expired_nfo(self):
         plugin = self.plugin()

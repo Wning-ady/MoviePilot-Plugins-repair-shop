@@ -141,7 +141,7 @@ class LibraryScraperFix(_PluginBase):
         "https://raw.githubusercontent.com/Wning-ady/"
         "MoviePilot-Plugins-repair-shop/main/icons/Ombi_A.png"
     )
-    plugin_version = "1.1.5"
+    plugin_version = "1.1.6"
     plugin_author = "jxxghp,Wning-ady"
     author_url = "https://github.com/Wning-ady/MoviePilot-Plugins-repair-shop"
     plugin_config_prefix = "libraryscraperfix_"
@@ -156,6 +156,8 @@ class LibraryScraperFix(_PluginBase):
     _last_run_key = "last_run"
     _history_key = "run_history"
     _detail_limit = 200
+    _nfo_change_detail_limit = 500
+    _nfo_change_text_limit = 500
     _run_lock = threading.Lock()
 
     _scheduler: Optional[BackgroundScheduler] = None
@@ -561,6 +563,9 @@ class LibraryScraperFix(_PluginBase):
         issues = self._issue_items(last_run)
         if issues:
             page.append(self._issues_panel(issues))
+        nfo_changes_panel = self._nfo_changes_panel(last_run)
+        if nfo_changes_panel:
+            page.append(nfo_changes_panel)
         page.extend(self._overview_components(last_run))
 
         details = self._target_detail_items(last_run)
@@ -1165,10 +1170,19 @@ class LibraryScraperFix(_PluginBase):
             return
 
         preview = ", ".join(sorted(updates))
+        changes = [
+            {
+                "field": field,
+                "before": existing_title if field == "title" else self._xml_text(root, field),
+                "after": value,
+            }
+            for field, value in updates.items()
+        ]
         if self._dry_run:
             logger.info(f"预演 NFO 字段修复：{nfo_path} - {preview}")
             if summary is not None:
                 summary["nfo_preview"] += 1
+                self._record_nfo_change(summary, nfo_path, path, "dry_run", changes)
             return
 
         for field, value in updates.items():
@@ -1188,6 +1202,7 @@ class LibraryScraperFix(_PluginBase):
                     summary["nfo_titles_updated"] += 1
                 if "plot" in updates or "outline" in updates:
                     summary["nfo_overviews_updated"] += 1
+                self._record_nfo_change(summary, nfo_path, path, "updated", changes)
         except OSError as err:
             try:
                 temp_path.unlink(missing_ok=True)
@@ -1204,6 +1219,54 @@ class LibraryScraperFix(_PluginBase):
     def _text_value(value: Any, field: str) -> str:
         raw = value.get(field) if isinstance(value, dict) else getattr(value, field, None)
         return str(raw).strip() if raw is not None else ""
+
+    @classmethod
+    def _record_nfo_change(
+        cls,
+        summary: Dict[str, Any],
+        nfo_path: Path,
+        media_path: Path,
+        status: str,
+        fields: List[Dict[str, str]],
+    ) -> None:
+        changes = summary.setdefault("nfo_changes", [])
+        summary["nfo_changes_total"] = int(summary.get("nfo_changes_total", 0) or 0) + 1
+        if len(changes) >= cls._nfo_change_detail_limit:
+            summary["nfo_changes_truncated"] = (
+                int(summary.get("nfo_changes_truncated", 0) or 0) + 1
+            )
+            return
+
+        text_truncated = 0
+
+        def truncate(value: Any) -> str:
+            nonlocal text_truncated
+            text = str(value or "")
+            if len(text) <= cls._nfo_change_text_limit:
+                return text
+            text_truncated += 1
+            return f"{text[:cls._nfo_change_text_limit - 3]}..."
+
+        changes.append(
+            {
+                "status": status,
+                "path": str(nfo_path),
+                "media_path": str(media_path),
+                "fields": [
+                    {
+                        "field": field.get("field", ""),
+                        "before": truncate(field.get("before")),
+                        "after": truncate(field.get("after")),
+                    }
+                    for field in fields
+                ],
+            }
+        )
+        if text_truncated:
+            summary["nfo_change_text_truncated"] = (
+                int(summary.get("nfo_change_text_truncated", 0) or 0)
+                + text_truncated
+            )
 
     @staticmethod
     def _is_generic_episode_title(value: str) -> bool:
@@ -2277,6 +2340,172 @@ class LibraryScraperFix(_PluginBase):
             ],
         }
 
+    @classmethod
+    def _nfo_changes_panel(cls, summary: Dict[str, Any]) -> Optional[dict]:
+        stored_changes = summary.get("nfo_changes")
+        if not isinstance(stored_changes, list):
+            if any(
+                int(summary.get(key, 0) or 0)
+                for key in ("nfo_updated", "nfo_preview")
+            ):
+                return {
+                    "component": "VAlert",
+                    "props": {
+                        "type": "info",
+                        "variant": "tonal",
+                        "title": "NFO 实际变更",
+                        "text": "该运行版本未保存字段级变更；升级后的下一次运行将显示具体文件、字段和修改前后内容。",
+                    },
+                }
+            return None
+
+        field_labels = {"title": "标题", "plot": "剧情", "outline": "简介"}
+        status_labels = {"updated": "已写入", "dry_run": "预演，未写入"}
+        rows = []
+        changed_files = set()
+        field_counts = {field: 0 for field in field_labels}
+        written_files = set()
+        preview_files = set()
+        for change in stored_changes:
+            if not isinstance(change, dict):
+                continue
+            path = str(change.get("path", ""))
+            status = str(change.get("status", "updated"))
+            fields = change.get("fields") or []
+            if not path or not isinstance(fields, list):
+                continue
+            valid_fields = [
+                field
+                for field in fields
+                if isinstance(field, dict) and field.get("field") in field_labels
+            ]
+            if not valid_fields:
+                continue
+            changed_files.add(path)
+            if status == "dry_run":
+                preview_files.add(path)
+            else:
+                written_files.add(path)
+            for field in valid_fields:
+                name = field["field"]
+                field_counts[name] += 1
+                rows.append(
+                    {
+                        "component": "tr",
+                        "content": [
+                            {
+                                "component": "td",
+                                "props": {"class": "text-break"},
+                                "text": path,
+                            },
+                            {"component": "td", "text": field_labels[name]},
+                            {
+                                "component": "td",
+                                "props": {"class": "text-break"},
+                                "text": str(field.get("before", "")) or "（空）",
+                            },
+                            {
+                                "component": "td",
+                                "props": {"class": "text-break"},
+                                "text": str(field.get("after", "")),
+                            },
+                            {
+                                "component": "td",
+                                "text": status_labels.get(status, status),
+                            },
+                        ],
+                    }
+                )
+        if not rows:
+            return None
+
+        truncated_changes = int(summary.get("nfo_changes_truncated", 0) or 0)
+        total_changes = max(
+            int(summary.get("nfo_changes_total", 0) or 0),
+            len(changed_files) + truncated_changes,
+        )
+        text_truncated = int(summary.get("nfo_change_text_truncated", 0) or 0)
+
+        pages = []
+        page_size = 20
+        for start in range(0, len(rows), page_size):
+            end = min(start + page_size, len(rows))
+            page_number = start // page_size + 1
+            pages.append(
+                {
+                    "component": "VExpansionPanel",
+                    "content": [
+                        {
+                            "component": "VExpansionPanelTitle",
+                            "text": f"第 {page_number} 页（{start + 1}-{end} / {len(rows)} 条字段变更）",
+                        },
+                        {
+                            "component": "VExpansionPanelText",
+                            "content": [
+                                cls._table(
+                                    ["NFO 文件", "字段", "修改前", "修改后", "状态"],
+                                    rows[start:end],
+                                )
+                            ],
+                        },
+                    ],
+                }
+            )
+
+        field_summary = " | ".join(
+            f"{field_labels[field]} {field_counts[field]}"
+            for field in ("title", "plot", "outline")
+            if field_counts[field]
+        )
+        notice_parts = [
+            (
+                f"已写入 {len(written_files)} 个文件 | "
+                f"预演 {len(preview_files)} 个文件，未写入 | {field_summary}"
+            )
+        ]
+        if truncated_changes:
+            notice_parts.append(
+                f"另有 {truncated_changes} 个文件的字段明细超出保存上限，未在本页显示"
+            )
+        if text_truncated:
+            notice_parts.append(
+                f"有 {text_truncated} 处前后内容超过 {cls._nfo_change_text_limit} 个字符，已截断显示"
+            )
+        title = f"NFO 实际变更（{len(changed_files)} 个文件 / {len(rows)} 个字段）"
+        if truncated_changes:
+            title = (
+                f"NFO 实际变更（本轮 {total_changes} 个文件；"
+                f"已显示 {len(changed_files)} 个 / {len(rows)} 个字段）"
+            )
+        return {
+            "component": "VSheet",
+            "props": {"class": "mt-4", "color": "transparent"},
+            "content": [
+                {
+                    "component": "div",
+                    "props": {"class": "text-subtitle-1 font-weight-medium mb-2"},
+                    "text": title,
+                },
+                {
+                    "component": "VAlert",
+                    "props": {
+                        "type": "success" if not preview_files else "info",
+                        "variant": "tonal",
+                        "text": "；".join(notice_parts),
+                    },
+                },
+                {
+                    "component": "VExpansionPanels",
+                    "props": {
+                        "variant": "accordion",
+                        "multiple": True,
+                        "modelValue": [0],
+                    },
+                    "content": pages,
+                },
+            ],
+        }
+
     @staticmethod
     def _table(headers: List[str], rows: List[dict]) -> dict:
         return {
@@ -2651,6 +2880,10 @@ class LibraryScraperFix(_PluginBase):
             "nfo_updated": 0,
             "nfo_titles_updated": 0,
             "nfo_overviews_updated": 0,
+            "nfo_changes": [],
+            "nfo_changes_total": 0,
+            "nfo_changes_truncated": 0,
+            "nfo_change_text_truncated": 0,
             "failures": [],
             "details": [],
             "issues": [],

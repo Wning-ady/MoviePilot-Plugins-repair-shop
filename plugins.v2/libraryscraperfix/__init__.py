@@ -141,7 +141,7 @@ class LibraryScraperFix(_PluginBase):
         "https://raw.githubusercontent.com/Wning-ady/"
         "MoviePilot-Plugins-repair-shop/main/icons/Ombi_A.png"
     )
-    plugin_version = "1.1.6"
+    plugin_version = "1.1.7"
     plugin_author = "jxxghp,Wning-ady"
     author_url = "https://github.com/Wning-ady/MoviePilot-Plugins-repair-shop"
     plugin_config_prefix = "libraryscraperfix_"
@@ -158,6 +158,8 @@ class LibraryScraperFix(_PluginBase):
     _detail_limit = 200
     _nfo_change_detail_limit = 500
     _nfo_change_text_limit = 500
+    _notification_nfo_change_limit = 5
+    _notification_nfo_text_limit = 80
     _run_lock = threading.Lock()
 
     _scheduler: Optional[BackgroundScheduler] = None
@@ -1231,6 +1233,16 @@ class LibraryScraperFix(_PluginBase):
     ) -> None:
         changes = summary.setdefault("nfo_changes", [])
         summary["nfo_changes_total"] = int(summary.get("nfo_changes_total", 0) or 0) + 1
+        field_count = len(fields)
+        summary["nfo_field_changes_total"] = (
+            int(summary.get("nfo_field_changes_total", 0) or 0) + field_count
+        )
+        status_field_key = (
+            "nfo_preview_field_changes"
+            if status == "dry_run"
+            else "nfo_written_field_changes"
+        )
+        summary[status_field_key] = int(summary.get(status_field_key, 0) or 0) + field_count
         if len(changes) >= cls._nfo_change_detail_limit:
             summary["nfo_changes_truncated"] = (
                 int(summary.get("nfo_changes_truncated", 0) or 0) + 1
@@ -2424,6 +2436,13 @@ class LibraryScraperFix(_PluginBase):
             int(summary.get("nfo_changes_total", 0) or 0),
             len(changed_files) + truncated_changes,
         )
+        stored_field_total = len(rows)
+        field_changes_total = (
+            int(summary.get("nfo_field_changes_total", 0) or 0)
+            if "nfo_field_changes_total" in summary
+            else stored_field_total
+        )
+        field_changes_total = max(field_changes_total, stored_field_total)
         text_truncated = int(summary.get("nfo_change_text_truncated", 0) or 0)
 
         pages = []
@@ -2465,17 +2484,19 @@ class LibraryScraperFix(_PluginBase):
         ]
         if truncated_changes:
             notice_parts.append(
-                f"另有 {truncated_changes} 个文件的字段明细超出保存上限，未在本页显示"
+                f"另有 {truncated_changes} 个文件 / "
+                f"{max(field_changes_total - stored_field_total, 0)} 个字段的明细"
+                "超出保存上限，未在本页显示"
             )
         if text_truncated:
             notice_parts.append(
                 f"有 {text_truncated} 处前后内容超过 {cls._nfo_change_text_limit} 个字符，已截断显示"
             )
-        title = f"NFO 实际变更（{len(changed_files)} 个文件 / {len(rows)} 个字段）"
+        title = f"NFO 实际变更（{len(changed_files)} 个文件 / {stored_field_total} 个字段）"
         if truncated_changes:
             title = (
-                f"NFO 实际变更（本轮 {total_changes} 个文件；"
-                f"已显示 {len(changed_files)} 个 / {len(rows)} 个字段）"
+                f"NFO 实际变更（本轮 {total_changes} 个文件 / {field_changes_total} 个字段；"
+                f"已显示 {len(changed_files)} 个文件 / {stored_field_total} 个字段）"
             )
         return {
             "component": "VSheet",
@@ -2884,6 +2905,9 @@ class LibraryScraperFix(_PluginBase):
             "nfo_changes_total": 0,
             "nfo_changes_truncated": 0,
             "nfo_change_text_truncated": 0,
+            "nfo_field_changes_total": 0,
+            "nfo_written_field_changes": 0,
+            "nfo_preview_field_changes": 0,
             "failures": [],
             "details": [],
             "issues": [],
@@ -2905,8 +2929,8 @@ class LibraryScraperFix(_PluginBase):
             f"失败 {summary['failed']} 个"
         )
 
-    @staticmethod
-    def _format_notification(summary: Dict[str, Any]) -> str:
+    @classmethod
+    def _format_notification(cls, summary: Dict[str, Any]) -> str:
         mode = "预演" if summary.get("dry_run_enabled") else "执行"
         lines = [
             f"模式：{mode}",
@@ -2953,12 +2977,119 @@ class LibraryScraperFix(_PluginBase):
                     summary.get("nfo_overviews_updated", 0),
                 )
             )
+        nfo_changes = cls._format_nfo_change_notification(summary)
+        if nfo_changes:
+            lines.extend(nfo_changes)
         failures = summary.get("failures") or []
         if failures:
             lines.append("前几项问题：")
             for item in failures[:5]:
                 lines.append(f"- {item.get('path')}: {item.get('detail')}")
         return "\n".join(lines)
+
+    @classmethod
+    def _format_nfo_change_notification(cls, summary: Dict[str, Any]) -> List[str]:
+        changes = summary.get("nfo_changes")
+        if not isinstance(changes, list) or not changes:
+            return []
+
+        field_labels = {"title": "标题", "plot": "剧情", "outline": "简介"}
+        status_labels = {"updated": "已写入", "dry_run": "预演，未写入"}
+        valid_changes = []
+        stored_field_total = 0
+        for change in changes:
+            if not isinstance(change, dict):
+                continue
+            fields = [
+                field
+                for field in (change.get("fields") or [])
+                if isinstance(field, dict) and field.get("field") in field_labels
+            ]
+            if not fields:
+                continue
+            valid_changes.append((change, fields))
+            stored_field_total += len(fields)
+        if not valid_changes:
+            return []
+
+        total_files = max(
+            int(summary.get("nfo_changes_total", 0) or 0), len(valid_changes)
+        )
+        total_fields = (
+            int(summary.get("nfo_field_changes_total", 0) or 0)
+            if "nfo_field_changes_total" in summary
+            else stored_field_total
+        )
+        total_fields = max(total_fields, stored_field_total)
+        written_files = int(summary.get("nfo_updated", 0) or 0)
+        preview_files = int(summary.get("nfo_preview", 0) or 0)
+        written_fields = (
+            int(summary.get("nfo_written_field_changes", 0) or 0)
+            if "nfo_written_field_changes" in summary
+            else sum(
+                len(fields)
+                for change, fields in valid_changes
+                if change.get("status") != "dry_run"
+            )
+        )
+        preview_fields = (
+            int(summary.get("nfo_preview_field_changes", 0) or 0)
+            if "nfo_preview_field_changes" in summary
+            else sum(
+                len(fields)
+                for change, fields in valid_changes
+                if change.get("status") == "dry_run"
+            )
+        )
+        summary_parts = []
+        if written_files:
+            summary_parts.append(f"已写入 {written_files} 个文件，{written_fields} 项字段")
+        if preview_files:
+            summary_parts.append(
+                f"预演 {preview_files} 个文件，{preview_fields} 项字段（未写入）"
+            )
+        if not summary_parts:
+            summary_parts.append(f"本轮 {total_files} 个文件，{total_fields} 项字段")
+
+        lines = [f"NFO 实际变更：{'；'.join(summary_parts)}"]
+        displayed_fields = 0
+        for index, (change, fields) in enumerate(
+            valid_changes[: cls._notification_nfo_change_limit], start=1
+        ):
+            path = Path(str(change.get("path", "")))
+            if len(path.parts) >= 2:
+                path_text = f".../{path.parent.name}/{path.name}"
+            else:
+                path_text = path.name or str(change.get("path", ""))
+            status = status_labels.get(str(change.get("status", "updated")), "已写入")
+            lines.append(f"{index}. {path_text}（{status}）")
+            for field in fields:
+                before = cls._notification_nfo_value(field.get("before"))
+                after = cls._notification_nfo_value(field.get("after"))
+                lines.append(
+                    f"   {field_labels[field['field']]}：{before} -> {after}"
+                )
+                displayed_fields += 1
+
+        hidden_files = max(
+            total_files - min(len(valid_changes), cls._notification_nfo_change_limit), 0
+        )
+        hidden_fields = max(total_fields - displayed_fields, 0)
+        if hidden_files or hidden_fields:
+            lines.append(
+                f"其余 {hidden_files} 个文件的 {hidden_fields} 项字段变更，"
+                "请到插件面板“实际 NFO 变更”查看完整前后内容。"
+            )
+        return lines
+
+    @classmethod
+    def _notification_nfo_value(cls, value: Any) -> str:
+        text = str(value or "").replace("\r", " ").replace("\n", " ").strip()
+        if not text:
+            return "（空）"
+        if len(text) <= cls._notification_nfo_text_limit:
+            return text
+        return f"{text[:cls._notification_nfo_text_limit - 3]}..."
 
     @staticmethod
     def _format_page_summary(summary: Dict[str, Any]) -> str:

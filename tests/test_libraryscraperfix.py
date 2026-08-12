@@ -961,6 +961,82 @@ class LibraryScraperFixTests(unittest.TestCase):
         notification = plugin._format_notification(summary)
         self.assertIn("待处理原因：新增 2，上次未完成 1", notification)
 
+    def test_notification_lists_nfo_change_files_and_field_values(self):
+        plugin = self.plugin()
+        summary = plugin._new_summary(plugin._now())
+        summary["nfo_updated"] = 1
+        plugin._record_nfo_change(
+            summary,
+            Path("/media/Show/Show.S01E01.nfo"),
+            Path("/media/Show/Show.S01E01.mkv"),
+            "updated",
+            [
+                {"field": "title", "before": "第 1 集", "after": "起点"},
+                {"field": "plot", "before": "", "after": "这是剧情简介。"},
+                {"field": "outline", "before": "", "after": "这是简短简介。"},
+            ],
+        )
+
+        notification = plugin._format_notification(summary)
+
+        self.assertIn("NFO 实际变更：已写入 1 个文件，3 项字段", notification)
+        self.assertIn(".../Show/Show.S01E01.nfo（已写入）", notification)
+        self.assertIn("标题：第 1 集 -> 起点", notification)
+        self.assertIn("剧情：（空） -> 这是剧情简介。", notification)
+        self.assertIn("简介：（空） -> 这是简短简介。", notification)
+
+    def test_notification_summarizes_extra_nfo_changes_after_five_files(self):
+        plugin = self.plugin()
+        summary = plugin._new_summary(plugin._now())
+        summary["nfo_preview"] = 6
+        for number in range(1, 7):
+            plugin._record_nfo_change(
+                summary,
+                Path(f"/media/Show/episode-{number:02d}.nfo"),
+                Path(f"/media/Show/episode-{number:02d}.mkv"),
+                "dry_run",
+                [{"field": "plot", "before": "", "after": f"剧情 {number}"}],
+            )
+
+        notification = plugin._format_notification(summary)
+
+        self.assertIn("预演 6 个文件，6 项字段（未写入）", notification)
+        self.assertIn(".../Show/episode-05.nfo（预演，未写入）", notification)
+        self.assertNotIn("episode-06.nfo（预演，未写入）", notification)
+        self.assertIn(
+            "其余 1 个文件的 1 项字段变更，请到插件面板“实际 NFO 变更”查看完整前后内容。",
+            notification,
+        )
+
+    def test_notification_keeps_full_nfo_counts_when_saved_details_are_limited(self):
+        plugin = self.plugin()
+        summary = plugin._new_summary(plugin._now())
+        summary["nfo_updated"] = 2
+        fields = [{"field": "plot", "before": "", "after": "剧情"}]
+        with mock.patch.object(type(plugin), "_nfo_change_detail_limit", 1):
+            plugin._record_nfo_change(
+                summary,
+                Path("/media/Show/episode-01.nfo"),
+                Path("/media/Show/episode-01.mkv"),
+                "updated",
+                fields,
+            )
+            plugin._record_nfo_change(
+                summary,
+                Path("/media/Show/episode-02.nfo"),
+                Path("/media/Show/episode-02.mkv"),
+                "updated",
+                fields,
+            )
+
+        notification = plugin._format_notification(summary)
+
+        self.assertIn("NFO 实际变更：已写入 2 个文件，2 项字段", notification)
+        self.assertIn(
+            "其余 1 个文件的 1 项字段变更，请到插件面板“实际 NFO 变更”查看完整前后内容。",
+            notification,
+        )
+
     def test_scrape_target_passes_cancel_event_before_source_root(self):
         plugin = self.plugin()
         target = ScrapeTarget(

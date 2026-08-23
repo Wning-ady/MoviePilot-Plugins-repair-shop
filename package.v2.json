@@ -21,6 +21,7 @@
     "icon": "https://raw.githubusercontent.com/Wning-ady/MoviePilot-Plugins-repair-shop/main/icons/Ombi_A.png",
     "author": "jxxghp,Wning-ady",
     "level": 1,
+    "v3": false,
     "history": {
       "v1.1.7": "运行通知新增 NFO 实际变更摘要：逐项说明前 5 个文件的字段前后内容；批量变更自动汇总并引导至结果面板，超过明细保存上限时仍显示真实文件和字段总量",
       "v1.1.6": "运行结果页新增 NFO 字段变更明细：显示 NFO 路径、字段、修改前后内容和执行/预演状态；明细按每页 20 条字段变更分组浏览",

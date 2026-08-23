@@ -1,10 +1,12 @@
 # MoviePilot Plugins Repair Shop
 
-用于发布经过针对性修复和回归测试的 MoviePilot V2 专用插件。仓库采用官方的 `package.v2.json` 与 `plugins.v2/` 结构。
+用于发布经过针对性修复和回归测试的 MoviePilot V2/V3 插件。V2 与 V3 需要不同运行合同时，按官方规范分别维护 `package.v2.json`、`package.v3.json` 以及 `plugins.v2/`、`plugins.v3/`。
 
 ## 媒体库刮削(魔改版)
 
-插件 ID：`LibraryScraperFix`，当前版本：`1.1.7`。
+插件 ID：`LibraryScraperFix`；V2 当前版本：`1.1.7`，V3 当前版本：`3.0.0`。
+
+MoviePilot V3 使用独立的 `plugins.v3/libraryscraperfix/` 实现：显式 TMDB/豆瓣识别使用 `media_source + media_id`，元数据写入使用 `ScrapingChain`，整理历史使用规范化媒体身份查询。V2 实现继续保留，V2 索引中的该条目标记为 `"v3": false`，避免 V3 回退到旧合同。
 
 本插件基于官方 [LibraryScraper 2.1.3](https://github.com/jxxghp/MoviePilot-Plugins/tree/main/plugins.v2/libraryscraper)，使用独立插件 ID，不覆盖官方插件。主要改进：
 
@@ -144,7 +146,9 @@ MoviePilot-Plugins-repair-shop/
 ├── icons/Ombi_A.png
 ├── plugins.v2/libraryscraperfix/__init__.py
 ├── plugins.v2/removelinkfix/__init__.py
-└── package.v2.json
+├── plugins.v3/libraryscraperfix/__init__.py
+├── package.v2.json
+└── package.v3.json
 ```
 
 插件目录名、类名、索引 ID、版本、名称、描述、图标、作者和权限级别均由自动化测试检查一致性。

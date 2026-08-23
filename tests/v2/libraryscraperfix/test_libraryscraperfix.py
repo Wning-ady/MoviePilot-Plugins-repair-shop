@@ -175,7 +175,7 @@ _module("apscheduler.schedulers.background", BackgroundScheduler=_Scheduler)
 _module("apscheduler.triggers.cron", CronTrigger=_CronTrigger)
 _module("pytz", timezone=lambda _name: timezone.utc)
 
-ROOT = Path(__file__).parents[1]
+ROOT = Path(__file__).parents[3]
 PLUGIN_PATH = ROOT / "plugins.v2" / "libraryscraperfix" / "__init__.py"
 SPEC = importlib.util.spec_from_file_location("libraryscraperfix", PLUGIN_PATH)
 PLUGIN = importlib.util.module_from_spec(SPEC)

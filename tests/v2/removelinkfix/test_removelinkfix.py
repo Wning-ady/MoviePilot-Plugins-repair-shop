@@ -63,7 +63,7 @@ _module("app.core.event", eventmanager=types.SimpleNamespace(send_event=lambda *
 _module("app.chain.storage", StorageChain=object)
 sys.modules["app"].schemas = sys.modules["app.schemas"]
 
-ROOT = Path(__file__).parents[1]
+ROOT = Path(__file__).parents[3]
 PLUGIN_PATH = ROOT / "plugins.v2" / "removelinkfix" / "__init__.py"
 SPEC = importlib.util.spec_from_file_location("removelinkfix", PLUGIN_PATH)
 PLUGIN = importlib.util.module_from_spec(SPEC)

@@ -147,11 +147,14 @@ MoviePilot-Plugins-repair-shop/
 ├── plugins.v2/libraryscraperfix/__init__.py
 ├── plugins.v2/removelinkfix/__init__.py
 ├── plugins.v3/libraryscraperfix/__init__.py
+├── tests/v2/libraryscraperfix/test_libraryscraperfix.py
+├── tests/v2/removelinkfix/test_removelinkfix.py
+├── tests/v3/libraryscraperfix/test_libraryscraperfix_v3.py
 ├── package.v2.json
 └── package.v3.json
 ```
 
-插件目录名、类名、索引 ID、版本、名称、描述、图标、作者和权限级别均由自动化测试检查一致性。
+插件目录名、类名、索引 ID、版本、名称、描述、图标、作者和权限级别均由自动化测试检查一致性。V3 测试按官方约定放在 `tests/v3/<plugin_id>/`；V2 历史实现测试放在 `tests/v2/<plugin_id>/`。
 
 ## 验证重点
 

@@ -4,7 +4,7 @@ import unittest
 from pathlib import Path
 
 
-ROOT = Path(__file__).parents[1]
+ROOT = Path(__file__).parents[3]
 V2_PACKAGE = ROOT / "package.v2.json"
 V3_PACKAGE = ROOT / "package.v3.json"
 V3_PLUGIN = ROOT / "plugins.v3" / "libraryscraperfix" / "__init__.py"

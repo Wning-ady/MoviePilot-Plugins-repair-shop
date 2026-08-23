@@ -1,6 +1,6 @@
 # MoviePilot Plugins Repair Shop
 
-用于发布经过针对性修复和回归测试的 MoviePilot V2/V3 插件。V2 与 V3 需要不同运行合同时，按官方规范分别维护 `package.v2.json`、`package.v3.json` 以及 `plugins.v2/`、`plugins.v3/`。
+用于发布经过针对性修复和回归测试的 MoviePilot V2/V3 插件。两个插件均按官方规范维护 V2 与 V3 独立实现：`package.v2.json`、`package.v3.json` 以及对应的 `plugins.v2/`、`plugins.v3/` 目录。
 
 ## 媒体库刮削(魔改版)
 
@@ -113,9 +113,9 @@ NFO 字段摘要中的“检查”是本轮实际解析的 NFO 数；“缓存�
 
 ## 清理媒体文件（修复版）
 
-插件 ID：`RemoveLinkFix`，当前版本：`2.18`。
+插件 ID：`RemoveLinkFix`；V2 当前版本：`2.18`，V3 当前版本：`3.0.0`。
 
-本插件基于 [DzAvril/MoviePilot-Plugins](https://github.com/DzAvril/MoviePilot-Plugins) 的 `RemoveLink 2.16`，并非基于 `jxxghp/MoviePilot-Plugins` 当前的 `RemoveLink 2.3.1`。主要修复：
+本插件基于 [DzAvril/MoviePilot-Plugins](https://github.com/DzAvril/MoviePilot-Plugins) 的 `RemoveLink 2.16`，并非基于 `jxxghp/MoviePilot-Plugins` 当前的 `RemoveLink 2.3.1`。V3 目录完整复刻 V2 的安全规则，并将事件、日志、配置和转移历史入口迁移到 V3 兼容路径。主要修复：
 
 - 下载器删除时使用临时源目录，导致转移记录按 `src` 无法命中的问题。
 - MoviePilot 重新整理失败后，媒体库目标删除被误判为主动删库，进而反向删除下载源和种子的问题。
@@ -145,11 +145,17 @@ NFO 字段摘要中的“检查”是本轮实际解析的 NFO 数；“缓存�
 MoviePilot-Plugins-repair-shop/
 ├── icons/Ombi_A.png
 ├── plugins.v2/libraryscraperfix/__init__.py
+├── plugins.v2/libraryscraperfix/README.md
 ├── plugins.v2/removelinkfix/__init__.py
+├── plugins.v2/removelinkfix/README.md
 ├── plugins.v3/libraryscraperfix/__init__.py
+├── plugins.v3/libraryscraperfix/README.md
+├── plugins.v3/removelinkfix/__init__.py
+├── plugins.v3/removelinkfix/README.md
 ├── tests/v2/libraryscraperfix/test_libraryscraperfix.py
 ├── tests/v2/removelinkfix/test_removelinkfix.py
 ├── tests/v3/libraryscraperfix/test_libraryscraperfix_v3.py
+├── tests/v3/removelinkfix/test_removelinkfix_v3.py
 ├── package.v2.json
 └── package.v3.json
 ```

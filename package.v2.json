@@ -7,6 +7,7 @@
     "icon": "https://raw.githubusercontent.com/Wning-ady/MoviePilot-Plugins-repair-shop/main/icons/Ombi_A.png",
     "author": "DzAvril,Wning-ady",
     "level": 1,
+    "v3": false,
     "history": {
       "v2.18": "修复重新整理失败后误删下载源与种子：目录和目标删除不再反向联动；仅唯一成功硬链接源记录通过路径、inode、链接数复核后精确清理，并发送一次带 hash 的种子事件",
       "v2.17": "修复临时源路径下转移记录误报、episode-thumb-N 残留、监控根越界、符号链接与媒体扩展误删风险；通知显示真实转移记录结果",

@@ -1,4 +1,17 @@
 {
+  "RemoveLinkFix": {
+    "name": "清理媒体文件（修复版）",
+    "description": "安全清理硬链接媒体文件；目标删除不反向清理下载源，源删除须经转移记录与 inode 复核。",
+    "labels": "文件整理",
+    "version": "3.0.0",
+    "icon": "https://raw.githubusercontent.com/Wning-ady/MoviePilot-Plugins-repair-shop/main/icons/Ombi_A.png",
+    "author": "DzAvril,Wning-ady",
+    "level": 1,
+    "system_version": ">=3.0.0",
+    "history": {
+      "v3.0.0": "适配 MoviePilot V3：复刻 V2 安全删除规则，迁移至 V3 SDK 事件、日志、配置和转移历史入口。"
+    }
+  },
   "LibraryScraperFix": {
     "name": "媒体库刮削(魔改版)",
     "description": "安全增量刮削媒体库，支持 NFO 空白概要与通用标题修复。",

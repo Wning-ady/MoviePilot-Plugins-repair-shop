@@ -4,9 +4,9 @@
 
 ## 媒体库刮削(魔改版)
 
-插件 ID：`LibraryScraperFix`；V2 当前版本：`1.1.7`，V3 当前版本：`3.0.0`。
+插件 ID：`LibraryScraperFix`；V2 当前版本：`1.1.8`，V3 当前版本：`3.0.1`。
 
-MoviePilot V3 使用独立的 `plugins.v3/libraryscraperfix/` 实现：显式 TMDB/豆瓣识别使用 `media_source + media_id`，元数据写入使用 `ScrapingChain`，整理历史使用规范化媒体身份查询。V2 实现继续保留，V2 索引中的该条目标记为 `"v3": false`，避免 V3 回退到旧合同。
+MoviePilot V3 使用独立的 `plugins.v3/libraryscraperfix/` 实现：显式 TMDB/豆瓣识别使用 `media_source + media_id`，元数据写入使用 `ScrapingChain`，整理历史使用规范化媒体身份查询。V2 实现继续保留，V2 索引中的该条目标记为 `"v3": false`，避免 V3 回退到旧合同。两套实现都采用流式目录扫描，避免大目录一次性加载全部条目。
 
 本插件基于官方 [LibraryScraper 2.1.3](https://github.com/jxxghp/MoviePilot-Plugins/tree/main/plugins.v2/libraryscraper)，使用独立插件 ID，不覆盖官方插件。主要改进：
 

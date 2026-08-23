@@ -3,12 +3,13 @@
     "name": "媒体库刮削(魔改版)",
     "description": "安全增量刮削媒体库，支持 NFO 空白概要与通用标题修复。",
     "labels": "媒体库,刮削",
-    "version": "3.0.0",
+    "version": "3.0.1",
     "icon": "https://raw.githubusercontent.com/Wning-ady/MoviePilot-Plugins-repair-shop/main/icons/Ombi_A.png",
     "author": "jxxghp,Wning-ady",
     "level": 1,
     "system_version": ">=3.0.0",
     "history": {
+      "v3.0.1": "优化大目录扫描：流式消费 os.scandir 条目，降低内存占用并更早产出媒体文件。",
       "v3.0.0": "适配 MoviePilot V3：使用 media_source + media_id 进行显式媒体识别，改用 ScrapingChain 执行元数据刮削，并迁移至 V3 SDK 与规范化整理历史查询。"
     }
   }

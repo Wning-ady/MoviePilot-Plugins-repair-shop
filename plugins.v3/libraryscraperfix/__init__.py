@@ -136,7 +136,7 @@ class LibraryScraperFix(_PluginBase):
         "https://raw.githubusercontent.com/Wning-ady/"
         "MoviePilot-Plugins-repair-shop/main/icons/Ombi_A.png"
     )
-    plugin_version = "3.0.0"
+    plugin_version = "3.0.1"
     plugin_author = "jxxghp,Wning-ady"
     author_url = "https://github.com/Wning-ady/MoviePilot-Plugins-repair-shop"
     plugin_config_prefix = "libraryscraperfix_"
@@ -841,37 +841,37 @@ class LibraryScraperFix(_PluginBase):
             if cancel_event.is_set():
                 return
             current_path = pending.pop()
+            child_dirs = []
             try:
                 with os.scandir(current_path) as scanner:
-                    entries = list(scanner)
+                    # Stream directory entries instead of materializing a full list;
+                    # this lowers memory use and lets large directories yield files sooner.
+                    for entry in scanner:
+                        entry_path = Path(entry.path)
+                        try:
+                            if entry.is_symlink():
+                                summary["symlinks_skipped"] += 1
+                                logger.warning(f"跳过符号链接：{entry_path}")
+                                continue
+                            if entry.is_dir(follow_symlinks=False):
+                                if self._is_excluded(entry_path, exclusions):
+                                    summary["excluded_dirs"] += 1
+                                    continue
+                                child_dirs.append(entry_path)
+                                continue
+                            if entry_path.suffix.lower() not in extensions:
+                                continue
+                            if self._is_excluded(entry_path, exclusions):
+                                summary["excluded_files"] += 1
+                                continue
+                            if not entry.is_file(follow_symlinks=False):
+                                continue
+                            yield entry_path, entry.stat(follow_symlinks=False)
+                        except OSError as err:
+                            on_error(err)
             except OSError as err:
                 on_error(err)
                 continue
-
-            child_dirs = []
-            for entry in entries:
-                entry_path = Path(entry.path)
-                try:
-                    if entry.is_symlink():
-                        summary["symlinks_skipped"] += 1
-                        logger.warning(f"跳过符号链接：{entry_path}")
-                        continue
-                    if entry.is_dir(follow_symlinks=False):
-                        if self._is_excluded(entry_path, exclusions):
-                            summary["excluded_dirs"] += 1
-                            continue
-                        child_dirs.append(entry_path)
-                        continue
-                    if entry_path.suffix.lower() not in extensions:
-                        continue
-                    if self._is_excluded(entry_path, exclusions):
-                        summary["excluded_files"] += 1
-                        continue
-                    if not entry.is_file(follow_symlinks=False):
-                        continue
-                    yield entry_path, entry.stat(follow_symlinks=False)
-                except OSError as err:
-                    on_error(err)
             pending.extend(reversed(child_dirs))
 
     def _run_target_with_retry(

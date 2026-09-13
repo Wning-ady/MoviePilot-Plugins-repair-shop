@@ -8,7 +8,7 @@ import tempfile
 import threading
 import types
 import unittest
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 from urllib.parse import urlparse
 
@@ -81,6 +81,9 @@ class _History:
         status=True,
         mode="link",
         download_hash="example-hash",
+        title="Example",
+        seasons="S01",
+        episodes="S01E01",
     ):
         self.id = record_id
         self.src = src
@@ -88,10 +91,13 @@ class _History:
         self.status = status
         self.mode = mode
         self.download_hash = download_hash
+        self.title = title
+        self.seasons = seasons
+        self.episodes = episodes
 
 
 class _HistoryStore:
-    def __init__(self, src=None, dest=None, histories=None):
+    def __init__(self, src=None, dest=None, histories=None, delete_effective=True):
         self.src = src
         self.dest = dest
         self.histories = list(histories or [])
@@ -99,6 +105,7 @@ class _HistoryStore:
             if history and all(item.id != history.id for item in self.histories):
                 self.histories.append(history)
         self.deleted = []
+        self.delete_effective = delete_effective
         self._db = _HistoryDatabase(self.histories)
         sys.modules["app.db"].ScopedSession = lambda: self._db
 
@@ -118,6 +125,10 @@ class _HistoryStore:
 
     def delete(self, record_id):
         self.deleted.append(record_id)
+        if self.delete_effective:
+            self.histories[:] = [
+                history for history in self.histories if history.id != record_id
+            ]
 
 
 class _HistoryQuery:
@@ -177,7 +188,12 @@ class RemoveLinkFixTests(unittest.TestCase):
         plugin._stop_event = threading.Event()
         plugin._lifecycle_lock = threading.Lock()
         plugin.deletion_queue = []
+        plugin._active_cleanup_started_at = None
+        plugin._active_cleanup_results = []
         plugin.file_state = {}
+        plugin._saved_data = {}
+        plugin.get_data = lambda key: plugin._saved_data.get(key)
+        plugin.save_data = lambda key, value: plugin._saved_data.__setitem__(key, value)
         return plugin
 
     def test_episode_thumbnail_and_media_extension_guard(self):
@@ -505,6 +521,198 @@ class RemoveLinkFixTests(unittest.TestCase):
                     ],
                 )
                 self.events.clear()
+
+    def test_history_delete_is_only_successful_after_id_disappears(self):
+        history = _History(7)
+        plugin = self.plugin()
+        plugin._transferhistory = _HistoryStore(histories=[history])
+
+        self.assertTrue(
+            plugin._delete_transfer_history_verified(history.id, history.src)
+        )
+        self.assertIsNone(plugin._transferhistory.get(history.id))
+
+        retained = _History(8)
+        plugin._transferhistory = _HistoryStore(
+            histories=[retained], delete_effective=False
+        )
+        self.assertFalse(
+            plugin._delete_transfer_history_verified(retained.id, retained.src)
+        )
+        self.assertIs(plugin._transferhistory.get(retained.id), retained)
+
+    def test_ineffective_history_delete_is_reported_as_retained(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            source = root / "downloads" / "episode.mkv"
+            destination = root / "media" / "episode.mkv"
+            source.parent.mkdir()
+            destination.parent.mkdir()
+            source.write_bytes(b"episode")
+            os.link(source, destination)
+            source_stat = source.lstat()
+            history = _History(
+                24890,
+                src=str(source),
+                dest=str(destination),
+                episodes="S01E183",
+            )
+            store = _HistoryStore(histories=[history], delete_effective=False)
+            plugin = self.plugin()
+            plugin._delayed_deletion = False
+            plugin._transferhistory = store
+            plugin.file_state = {
+                str(source): PLUGIN.FileInfo(
+                    source_stat.st_dev, source_stat.st_ino, datetime.now()
+                ),
+                str(destination): PLUGIN.FileInfo(
+                    source_stat.st_dev, source_stat.st_ino, datetime.now()
+                ),
+            }
+
+            source.unlink()
+            plugin.handle_deleted(source)
+
+            self.assertFalse(destination.exists())
+            self.assertIs(store.get(history.id), history)
+            batch = plugin._saved_data[plugin._cleanup_history_key][0]
+            self.assertEqual(batch["histories_deleted"], 0)
+            self.assertEqual(batch["histories_retained"], 1)
+            self.assertEqual(batch["failed"], 1)
+            self.assertEqual(batch["items"][0]["history_status"], "retained")
+            page = json.dumps(plugin.get_page(), ensure_ascii=False)
+            self.assertIn("24890", page)
+            self.assertIn("S01E183", page)
+            self.assertIn("仍保留", page)
+
+    def test_missing_hash_does_not_block_verified_history_delete(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            source = root / "downloads" / "episode.mkv"
+            destination = root / "media" / "episode.mkv"
+            source.parent.mkdir()
+            destination.parent.mkdir()
+            source.write_bytes(b"episode")
+            os.link(source, destination)
+            source_stat = source.lstat()
+            history = _History(
+                25070,
+                src=str(source),
+                dest=str(destination),
+                download_hash=None,
+                episodes="S01E191",
+            )
+            store = _HistoryStore(histories=[history])
+            plugin = self.plugin()
+            plugin._delayed_deletion = False
+            plugin._delete_torrents = True
+            plugin._transferhistory = store
+            plugin.file_state = {
+                str(source): PLUGIN.FileInfo(
+                    source_stat.st_dev, source_stat.st_ino, datetime.now()
+                ),
+                str(destination): PLUGIN.FileInfo(
+                    source_stat.st_dev, source_stat.st_ino, datetime.now()
+                ),
+            }
+
+            source.unlink()
+            plugin.handle_deleted(source)
+
+            self.assertFalse(destination.exists())
+            self.assertIsNone(store.get(history.id))
+            self.assertEqual(self.events, [])
+            batch = plugin._saved_data[plugin._cleanup_history_key][0]
+            self.assertEqual(batch["histories_deleted"], 1)
+            self.assertEqual(batch["torrents_missing_hash"], 1)
+            self.assertEqual(batch["success"], 1)
+
+    def test_delayed_queue_accumulates_results_across_timer_rounds(self):
+        plugin = self.plugin()
+        plugin._delay_seconds = 30
+        plugin._active_cleanup_started_at = "2026-09-13 12:04:00"
+        scheduled = []
+        plugin._start_deletion_timer = lambda delay_time=None: scheduled.append(
+            delay_time
+        )
+        now = datetime.now()
+        tasks = []
+        for index in range(31):
+            evidence = PLUGIN.DeletionEvidence(
+                history_id=160 + index + 1,
+                src=f"/downloads/E{160 + index + 1}.mkv",
+                dest=f"/media/E{160 + index + 1}.mkv",
+                mode="link",
+                download_hash=f"hash-{index}",
+                episode=f"S01E{160 + index + 1}",
+            )
+            tasks.append(
+                PLUGIN.DeletionTask(
+                    file_path=Path(evidence.src),
+                    deleted_dev=1,
+                    deleted_inode=1000 + index,
+                    deleted_add_time=now,
+                    timestamp=now - timedelta(seconds=31) if index == 0 else now,
+                    evidence=evidence,
+                )
+            )
+        plugin.deletion_queue = tasks
+
+        def complete(task):
+            task.result = plugin._build_cleanup_result(
+                source=task.file_path,
+                evidence=task.evidence,
+                deleted_files=[task.evidence.dest],
+                history_deleted_count=1,
+                torrent_event_sent=False,
+                delayed=True,
+            )
+            task.processed = True
+
+        plugin._execute_delayed_deletion = complete
+
+        plugin._process_deletion_queue()
+
+        self.assertEqual(len(plugin.deletion_queue), 30)
+        self.assertEqual(len(plugin._active_cleanup_results), 1)
+        self.assertNotIn(plugin._cleanup_history_key, plugin._saved_data)
+        self.assertEqual(len(scheduled), 1)
+
+        for task in plugin.deletion_queue:
+            task.timestamp = datetime.now() - timedelta(seconds=31)
+        plugin._process_deletion_queue()
+
+        batch = plugin._saved_data[plugin._cleanup_history_key][0]
+        self.assertEqual(batch["processed"], 31)
+        self.assertEqual(batch["files_deleted"], 31)
+        self.assertEqual(batch["histories_deleted"], 31)
+        self.assertEqual(batch["success"], 31)
+        self.assertEqual(plugin.deletion_queue, [])
+        self.assertEqual(plugin._active_cleanup_results, [])
+
+    def test_recreated_source_delayed_result_is_not_lost(self):
+        plugin = self.plugin()
+        plugin._delay_seconds = 0
+        plugin._active_cleanup_started_at = "2026-09-13 12:04:00"
+        plugin._start_deletion_timer = lambda delay_time=None: None
+        with tempfile.TemporaryDirectory() as tmp:
+            recreated = Path(tmp) / "episode.mkv"
+            recreated.write_bytes(b"replacement")
+            task = PLUGIN.DeletionTask(
+                file_path=recreated,
+                deleted_dev=1,
+                deleted_inode=2,
+                deleted_add_time=datetime.now(),
+                timestamp=datetime.now() - timedelta(seconds=1),
+            )
+            plugin.deletion_queue = [task]
+
+            plugin._process_deletion_queue()
+
+        batch = plugin._saved_data[plugin._cleanup_history_key][0]
+        self.assertEqual(batch["processed"], 1)
+        self.assertEqual(batch["skipped"], 1)
+        self.assertEqual(batch["items"][0]["history_status"], "not_processed")
 
     def test_recreated_source_path_cancels_verified_deletion(self):
         with tempfile.TemporaryDirectory() as tmp:

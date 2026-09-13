@@ -60,6 +60,41 @@ class RemoveLinkFixV3StructureTests(unittest.TestCase):
         ):
             self.assertNotIn(legacy_import, source)
 
+    def test_v2_and_v3_cleanup_result_methods_stay_in_sync(self):
+        v2_tree = ast.parse(
+            (ROOT / "plugins.v2" / "removelinkfix" / "__init__.py").read_text(
+                encoding="utf-8"
+            )
+        )
+        v3_tree = ast.parse(V3_PLUGIN.read_text(encoding="utf-8"))
+
+        def plugin_methods(tree):
+            plugin_class = next(
+                node
+                for node in tree.body
+                if isinstance(node, ast.ClassDef) and node.name == "RemoveLinkFix"
+            )
+            return {
+                node.name: ast.dump(node, include_attributes=False)
+                for node in plugin_class.body
+                if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+            }
+
+        method_names = (
+            "get_page",
+            "_delete_transfer_history_verified",
+            "_build_cleanup_result",
+            "_save_cleanup_batch",
+            "_execute_delayed_deletion",
+            "_process_deletion_queue",
+            "handle_deleted",
+        )
+        v2_methods = plugin_methods(v2_tree)
+        v3_methods = plugin_methods(v3_tree)
+        for method_name in method_names:
+            with self.subTest(method=method_name):
+                self.assertEqual(v2_methods[method_name], v3_methods[method_name])
+
 
 if __name__ == "__main__":
     unittest.main()

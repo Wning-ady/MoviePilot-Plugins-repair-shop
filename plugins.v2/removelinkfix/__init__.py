@@ -101,6 +101,9 @@ class DeletionEvidence:
     dest: str
     mode: str
     download_hash: Optional[str]
+    title: str = ""
+    season: str = ""
+    episode: str = ""
 
 
 @dataclass
@@ -114,6 +117,7 @@ class DeletionTask:
     timestamp: datetime
     evidence: Optional[DeletionEvidence] = None
     processed: bool = False
+    result: Optional[Dict[str, Any]] = None
 
 
 class FileMonitorHandler(FileSystemEventHandler):
@@ -298,7 +302,7 @@ class RemoveLinkFix(_PluginBase):
     # 插件图标
     plugin_icon = "https://raw.githubusercontent.com/Wning-ady/MoviePilot-Plugins-repair-shop/main/icons/Ombi_A.png"
     # 插件版本
-    plugin_version = "2.18"
+    plugin_version = "2.19"
     # 插件作者
     plugin_author = "DzAvril,Wning-ady"
     # 作者主页
@@ -371,6 +375,9 @@ class RemoveLinkFix(_PluginBase):
     _deletion_timer = None
     _stop_event = None
     _lifecycle_lock = threading.Lock()
+    _cleanup_history_key = "cleanup_history"
+    _cleanup_history_limit = 20
+    _cleanup_item_limit = 200
 
     @staticmethod
     def __choose_observer():
@@ -430,6 +437,8 @@ class RemoveLinkFix(_PluginBase):
 
         # 初始化延迟删除队列
         self.deletion_queue = []
+        self._active_cleanup_started_at = None
+        self._active_cleanup_results = []
 
         if self._enabled:
             # 记录延迟删除配置状态
@@ -1013,7 +1022,185 @@ class RemoveLinkFix(_PluginBase):
         }
 
     def get_page(self) -> List[dict]:
-        pass
+        try:
+            history = self.get_data(self._cleanup_history_key) or []
+        except Exception as error:
+            logger.error(f"读取最近删除结果失败：{error}")
+            history = []
+        if not isinstance(history, list) or not history:
+            return [
+                {
+                    "component": "VAlert",
+                    "props": {
+                        "type": "info",
+                        "variant": "tonal",
+                        "title": "暂无删除结果",
+                        "text": "下一次执行安全联动删除后，这里会显示文件、整理记录和种子联动的真实结果。",
+                    },
+                }
+            ]
+
+        batch = history[0]
+        retained = int(batch.get("histories_retained", 0) or 0)
+        failed = int(batch.get("failed", 0) or 0)
+        alert_type = "error" if failed else "success"
+        alert_title = "删除批次完成"
+        if failed:
+            alert_title = f"删除批次完成，{failed} 项需处理"
+        page = [
+            {
+                "component": "VAlert",
+                "props": {
+                    "type": alert_type,
+                    "variant": "tonal",
+                    "title": alert_title,
+                    "text": (
+                        f"{batch.get('finished_at', '-')} | "
+                        f"处理 {batch.get('processed', 0)} 个任务 | "
+                        f"删除 {batch.get('files_deleted', 0)} 个硬链接文件"
+                    ),
+                },
+            },
+            {
+                "component": "VRow",
+                "props": {"class": "mt-1"},
+                "content": [
+                    self._cleanup_metric_card(
+                        "整理记录",
+                        f"{batch.get('histories_deleted', 0)} 条已删除",
+                        f"{retained} 条仍保留",
+                    ),
+                    self._cleanup_metric_card(
+                        "种子联动",
+                        f"{batch.get('torrents_sent', 0)} 条已发送",
+                        f"{batch.get('torrents_missing_hash', 0)} 条缺少 Hash",
+                    ),
+                    self._cleanup_metric_card(
+                        "执行结果",
+                        f"{batch.get('success', 0)} 项完成",
+                        f"{batch.get('skipped', 0)} 项跳过 | {failed} 项失败",
+                    ),
+                ],
+            },
+        ]
+
+        items = batch.get("items") or []
+        if items:
+            rows = []
+            history_labels = {
+                "deleted": "已删除",
+                "retained": "仍保留",
+                "disabled": "未启用",
+                "not_processed": "未执行",
+            }
+            torrent_labels = {
+                "sent": "已发送",
+                "missing_hash": "缺少 Hash",
+                "disabled": "未启用",
+                "not_sent": "未发送",
+            }
+            for item in items:
+                rows.append(
+                    {
+                        "component": "tr",
+                        "content": [
+                            {"component": "td", "text": item.get("episode") or "-"},
+                            {
+                                "component": "td",
+                                "text": str(item.get("history_id") or "-"),
+                            },
+                            {
+                                "component": "td",
+                                "text": history_labels.get(
+                                    item.get("history_status"), item.get("history_status") or "-"
+                                ),
+                            },
+                            {
+                                "component": "td",
+                                "text": torrent_labels.get(
+                                    item.get("torrent_status"), item.get("torrent_status") or "-"
+                                ),
+                            },
+                            {
+                                "component": "td",
+                                "props": {"class": "text-break"},
+                                "text": item.get("source") or "-",
+                            },
+                            {
+                                "component": "td",
+                                "props": {"class": "text-break"},
+                                "text": item.get("detail") or "-",
+                            },
+                        ],
+                    }
+                )
+            page.append(
+                {
+                    "component": "VExpansionPanels",
+                    "props": {"variant": "accordion", "modelValue": [0]},
+                    "content": [
+                        {
+                            "component": "VExpansionPanel",
+                            "content": [
+                                {
+                                    "component": "VExpansionPanelTitle",
+                                    "text": f"最近删除明细（{len(items)}）",
+                                },
+                                {
+                                    "component": "VExpansionPanelText",
+                                    "content": [
+                                        {
+                                            "component": "VTable",
+                                            "props": {"density": "compact", "hover": True},
+                                            "content": [
+                                                {
+                                                    "component": "thead",
+                                                    "content": [
+                                                        {
+                                                            "component": "tr",
+                                                            "content": [
+                                                                {"component": "th", "text": header}
+                                                                for header in (
+                                                                    "集数",
+                                                                    "记录 ID",
+                                                                    "整理记录",
+                                                                    "种子联动",
+                                                                    "源文件",
+                                                                    "说明",
+                                                                )
+                                                            ],
+                                                        }
+                                                    ],
+                                                },
+                                                {"component": "tbody", "content": rows},
+                                            ],
+                                        }
+                                    ],
+                                },
+                            ],
+                        }
+                    ],
+                }
+            )
+        return page
+
+    @staticmethod
+    def _cleanup_metric_card(title: str, primary: str, secondary: str) -> dict:
+        return {
+            "component": "VCol",
+            "props": {"cols": 12, "md": 4},
+            "content": [
+                {
+                    "component": "VCard",
+                    "props": {"variant": "outlined", "class": "h-100"},
+                    "content": [
+                        {"component": "VCardSubtitle", "text": title},
+                        {"component": "VCardTitle", "text": primary},
+                        {"component": "VCardText", "text": secondary},
+                    ],
+                }
+            ],
+        }
 
     def stop_service(self):
         """
@@ -1054,6 +1241,8 @@ class RemoveLinkFix(_PluginBase):
         with deletion_queue_lock:
             pending_count = sum(1 for task in self.deletion_queue if not task.processed)
             self.deletion_queue.clear()
+            self._active_cleanup_started_at = None
+            self._active_cleanup_results = []
         if pending_count:
             logger.warning(
                 f"插件停止，已丢弃 {pending_count} 个尚未到期的延迟删除任务"
@@ -1453,6 +1642,9 @@ class RemoveLinkFix(_PluginBase):
             dest=destination,
             mode=mode,
             download_hash=getattr(history, "download_hash", None),
+            title=str(getattr(history, "title", "") or ""),
+            season=str(getattr(history, "seasons", "") or ""),
+            episode=str(getattr(history, "episodes", "") or ""),
         )
 
     def _validated_deletion_history(self, evidence: DeletionEvidence):
@@ -1549,6 +1741,31 @@ class RemoveLinkFix(_PluginBase):
             return None
         return destination
 
+    def _delete_transfer_history_verified(self, history_id: int, source: str) -> bool:
+        """删除整理记录并按 ID 回查，只在记录真正消失时返回成功。"""
+        try:
+            self._transferhistory.delete(history_id)
+        except Exception as error:
+            logger.error(f"删除转移记录失败：{history_id} - {source} - {error}")
+            return False
+
+        try:
+            remaining = self._transferhistory.get(history_id)
+        except Exception as error:
+            logger.error(f"复核转移记录失败：{history_id} - {source} - {error}")
+            return False
+        if remaining:
+            task_hint = ""
+            if getattr(remaining, "transfer_task_id", None):
+                task_hint = "（记录仍绑定持久整理任务）"
+            logger.warning(
+                f"转移记录删除请求未生效{task_hint}：{history_id} - {source}"
+            )
+            return False
+
+        logger.info(f"删除转移记录：{history_id} - {source}")
+        return True
+
     def _execute_verified_source_deletion(
         self,
         file_path: Path,
@@ -1613,10 +1830,10 @@ class RemoveLinkFix(_PluginBase):
 
             if self._delete_history:
                 history = self._validated_deletion_history(evidence)
-                if history:
-                    self._transferhistory.delete(history.id)
+                if history and self._delete_transfer_history_verified(
+                    history.id, evidence.src
+                ):
                     history_deleted_count = 1
-                    logger.info(f"删除转移记录：{history.id} - {evidence.src}")
 
         return [str(destination)], history_deleted_count, torrent_event_sent
 
@@ -1655,10 +1872,130 @@ class RemoveLinkFix(_PluginBase):
             text=f"{mode_text}\n\n" + "\n".join(notification_parts),
         )
 
+    def _build_cleanup_result(
+        self,
+        source: Path,
+        evidence: Optional[DeletionEvidence],
+        deleted_files: List[str],
+        history_deleted_count: int,
+        torrent_event_sent: bool,
+        delayed: bool,
+        error: str = "",
+    ) -> Dict[str, Any]:
+        """将单个删除任务转换为可持久化、可核验的结果。"""
+        if not self._delete_history:
+            history_status = "disabled"
+        elif history_deleted_count:
+            history_status = "deleted"
+        elif deleted_files:
+            history_status = "retained"
+        else:
+            history_status = "not_processed"
+
+        if not self._delete_torrents:
+            torrent_status = "disabled"
+        elif torrent_event_sent:
+            torrent_status = "sent"
+        elif deleted_files and evidence and not evidence.download_hash:
+            torrent_status = "missing_hash"
+        else:
+            torrent_status = "not_sent"
+
+        if error:
+            status = "failed"
+            detail = error[:500]
+        elif not deleted_files:
+            status = "skipped"
+            detail = "安全复核未通过或任务已取消"
+        elif history_status == "retained":
+            status = "failed"
+            detail = "硬链接文件已删除，但整理记录回查仍存在"
+        else:
+            status = "success"
+            detail = "删除完成"
+
+        return {
+            "completed_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            "mode": "delayed" if delayed else "immediate",
+            "status": status,
+            "source": str(source),
+            "destination": evidence.dest if evidence else "",
+            "title": evidence.title if evidence else "",
+            "season": evidence.season if evidence else "",
+            "episode": evidence.episode if evidence else "",
+            "history_id": evidence.history_id if evidence else None,
+            "history_status": history_status,
+            "torrent_status": torrent_status,
+            "deleted_files": list(deleted_files),
+            "detail": detail,
+        }
+
+    def _save_cleanup_batch(
+        self, results: List[Dict[str, Any]], started_at: Optional[str] = None
+    ) -> None:
+        """保存完整删除批次，并输出与真实结果一致的汇总。"""
+        if not results:
+            return
+        batch = {
+            "started_at": started_at or results[0].get("completed_at"),
+            "finished_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            "processed": len(results),
+            "files_deleted": sum(
+                len(item.get("deleted_files") or []) for item in results
+            ),
+            "histories_deleted": sum(
+                item.get("history_status") == "deleted" for item in results
+            ),
+            "histories_retained": sum(
+                item.get("history_status") == "retained" for item in results
+            ),
+            "torrents_sent": sum(
+                item.get("torrent_status") == "sent" for item in results
+            ),
+            "torrents_missing_hash": sum(
+                item.get("torrent_status") == "missing_hash" for item in results
+            ),
+            "success": sum(item.get("status") == "success" for item in results),
+            "skipped": sum(item.get("status") == "skipped" for item in results),
+            "failed": sum(item.get("status") == "failed" for item in results),
+            "items": results[: self._cleanup_item_limit],
+        }
+        try:
+            history = self.get_data(self._cleanup_history_key) or []
+            if not isinstance(history, list):
+                history = []
+            self.save_data(
+                self._cleanup_history_key,
+                [batch] + history[: self._cleanup_history_limit - 1],
+            )
+        except Exception as error:
+            logger.error(f"保存删除批次结果失败：{error}")
+
+        summary = (
+            f"删除批次完成：任务 {batch['processed']}，"
+            f"硬链接文件 {batch['files_deleted']}，"
+            f"整理记录已删除 {batch['histories_deleted']}，"
+            f"整理记录仍保留 {batch['histories_retained']}，"
+            f"种子联动 {batch['torrents_sent']}，"
+            f"缺少 Hash {batch['torrents_missing_hash']}，"
+            f"跳过 {batch['skipped']}，失败 {batch['failed']}"
+        )
+        logger.info(summary)
+        if self._notify:
+            self.post_message(
+                mtype=NotificationType.SiteMessage,
+                title="🧹 媒体文件删除批次完成",
+                text=summary,
+            )
+
     def _execute_delayed_deletion(self, task: DeletionTask):
         """
         执行延迟删除任务
         """
+        deleted_files: List[str] = []
+        history_deleted_count = 0
+        torrent_event_sent = False
+        error_detail = ""
         try:
             if self._service_stopping():
                 return
@@ -1689,9 +2026,20 @@ class RemoveLinkFix(_PluginBase):
             )
 
         except Exception as e:
+            error_detail = str(e)
             logger.error(f"执行延迟删除任务失败：{str(e)} - {traceback.format_exc()}")
         finally:
+            task.result = self._build_cleanup_result(
+                source=task.file_path,
+                evidence=task.evidence,
+                deleted_files=deleted_files,
+                history_deleted_count=history_deleted_count,
+                torrent_event_sent=torrent_event_sent,
+                delayed=True,
+                error=error_detail,
+            )
             task.processed = True
+        return task.result
 
     def _process_deletion_queue(self):
         """
@@ -1718,18 +2066,24 @@ class RemoveLinkFix(_PluginBase):
                     )
 
             # 在锁外处理任务，避免死锁
-            processed_count = 0
+            completed_results = []
             for task in tasks_to_process:
                 if self._service_stopping():
                     break
                 try:
                     self._execute_delayed_deletion(task)
-                    processed_count += 1
+                    result = task.result
+                    if result:
+                        completed_results.append(result)
                 except Exception as e:
                     logger.error(f"处理延迟删除任务失败：{task.file_path} - {e}")
 
             # 重新获取锁进行清理和定时器管理
+            completed_batch = []
+            completed_batch_started_at = None
             with deletion_queue_lock:
+                if completed_results:
+                    self._active_cleanup_results.extend(completed_results)
                 # 清理已处理的任务
                 original_count = len(self.deletion_queue)
                 self.deletion_queue = [
@@ -1738,7 +2092,9 @@ class RemoveLinkFix(_PluginBase):
                 cleaned_count = original_count - len(self.deletion_queue)
 
                 if cleaned_count > 0:
-                    logger.debug(f"清理了 {cleaned_count} 个已处理的任务")
+                    logger.debug(
+                        f"从延迟删除队列移除 {cleaned_count} 个已完成任务"
+                    )
 
                 # 如果还有未处理的任务，重新启动定时器
                 if self.deletion_queue and not self._service_stopping():
@@ -1756,8 +2112,17 @@ class RemoveLinkFix(_PluginBase):
                     )
                     self._start_deletion_timer(wait_time)
                 else:
+                    completed_batch = list(self._active_cleanup_results)
+                    completed_batch_started_at = self._active_cleanup_started_at
+                    self._active_cleanup_results = []
+                    self._active_cleanup_started_at = None
                     self._deletion_timer = None
                     logger.debug("延迟删除队列已清空，定时器停止")
+
+            if completed_batch:
+                self._save_cleanup_batch(
+                    completed_batch, started_at=completed_batch_started_at
+                )
 
         except Exception as e:
             logger.error(f"处理延迟删除队列失败：{str(e)} - {traceback.format_exc()}")
@@ -1810,6 +2175,11 @@ class RemoveLinkFix(_PluginBase):
                 evidence=evidence,
             )
             with deletion_queue_lock:
+                if not self.deletion_queue:
+                    self._active_cleanup_started_at = datetime.now().strftime(
+                        "%Y-%m-%d %H:%M:%S"
+                    )
+                    self._active_cleanup_results = []
                 self.deletion_queue.append(task)
                 if not self._deletion_timer:
                     self._start_deletion_timer()
@@ -1818,6 +2188,10 @@ class RemoveLinkFix(_PluginBase):
                     logger.debug("延迟删除定时器已在运行，任务已加入队列")
             return
 
+        started_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        deleted_files: List[str] = []
+        history_deleted_count = 0
+        torrent_event_sent = False
         try:
             (
                 deleted_files,
@@ -1837,10 +2211,29 @@ class RemoveLinkFix(_PluginBase):
                 torrent_event_sent=torrent_event_sent,
                 delayed=False,
             )
+            result = self._build_cleanup_result(
+                source=file_path,
+                evidence=evidence,
+                deleted_files=deleted_files,
+                history_deleted_count=history_deleted_count,
+                torrent_event_sent=torrent_event_sent,
+                delayed=False,
+            )
+            self._save_cleanup_batch([result], started_at=started_at)
         except Exception as error:
             logger.error(
                 f"安全联动删除发生错误：{error} - {traceback.format_exc()}"
             )
+            result = self._build_cleanup_result(
+                source=file_path,
+                evidence=evidence,
+                deleted_files=deleted_files,
+                history_deleted_count=history_deleted_count,
+                torrent_event_sent=torrent_event_sent,
+                delayed=False,
+                error=str(error),
+            )
+            self._save_cleanup_batch([result], started_at=started_at)
 
     def _parse_strm_path_mappings(self) -> Dict[str, Tuple[str, str]]:
         """

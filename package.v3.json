@@ -3,12 +3,13 @@
     "name": "清理媒体文件（修复版）",
     "description": "安全清理硬链接媒体文件；目标删除不反向清理下载源，源删除须经转移记录与 inode 复核。",
     "labels": "文件整理",
-    "version": "3.0.0",
+    "version": "3.0.1",
     "icon": "https://raw.githubusercontent.com/Wning-ady/MoviePilot-Plugins-repair-shop/main/icons/Ombi_A.png",
     "author": "DzAvril,Wning-ady",
     "level": 1,
     "system_version": ">=3.0.0",
     "history": {
+      "v3.0.1": "删除整理记录后按 ID 回查，仅在记录确实消失时报告成功；新增删除批次结果页，跨定时器轮次汇总任务并展示记录 ID、集数、整理记录与种子联动状态；修正队列清理日志文案",
       "v3.0.0": "适配 MoviePilot V3：复刻 V2 安全删除规则，迁移至 V3 SDK 事件、日志、配置和转移历史入口。"
     }
   },

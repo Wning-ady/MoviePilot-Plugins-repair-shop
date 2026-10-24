@@ -110,7 +110,11 @@ class LibraryScraperFixV3StructureTests(unittest.TestCase):
         self.assertIn('"path": "/history"', source)
         remote_entry = V3_PLUGIN.parent / "dist" / "assets" / "remoteEntry.js"
         self.assertTrue(remote_entry.is_file())
-        self.assertIn('"./Config"', remote_entry.read_text(encoding="utf-8"))
+        remote_source = remote_entry.read_text(encoding="utf-8")
+        self.assertIn('"./Page"', remote_source)
+        self.assertIn('"./AppPage"', remote_source)
+        self.assertIn('"./Config"', remote_source)
+        self.assertNotIn("${__federation_expose", remote_source)
 
 
 if __name__ == "__main__":

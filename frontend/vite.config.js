@@ -24,13 +24,17 @@ const configs = {
   library: {
     name: 'LibraryScraperFix',
     source: './src/library/Page.vue',
+    appPage: './src/library/AppPage.vue',
     config: './src/library/Config.vue',
+    entry: './src/library/entry.js',
     output: '../plugins.v3/libraryscraperfix/dist/assets',
   },
   remove: {
     name: 'RemoveLinkFix',
     source: './src/remove/Page.vue',
+    appPage: './src/remove/AppPage.vue',
     config: './src/remove/Config.vue',
+    entry: './src/remove/entry.js',
     output: '../plugins.v3/removelinkfix/dist/assets',
   },
 }
@@ -48,7 +52,7 @@ export default defineConfig({
       filename: 'remoteEntry.js',
       exposes: {
         './Page': plugin.source,
-        './AppPage': plugin.source,
+        './AppPage': plugin.appPage,
         './Config': plugin.config,
       },
       shared: {
@@ -77,7 +81,7 @@ export default defineConfig({
     outDir: path.resolve(process.cwd(), plugin.output),
     emptyOutDir: true,
     rollupOptions: {
-      input: path.resolve(process.cwd(), plugin.source),
+      input: path.resolve(process.cwd(), plugin.entry),
       output: {
         entryFileNames: '[name].js',
         chunkFileNames: '[name]-[hash].js',

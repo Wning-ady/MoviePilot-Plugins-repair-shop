@@ -38,6 +38,7 @@ class LibraryScraperFixV3StructureTests(unittest.TestCase):
         self.assertEqual(metadata["version"], class_values["plugin_version"])
         self.assertEqual(metadata["author"], class_values["plugin_author"])
         self.assertEqual(metadata["level"], class_values["auth_level"])
+        self.assertTrue(metadata["release"])
         self.assertEqual(metadata["system_version"], ">=3.0.0")
 
         v2_metadata = json.loads(V2_PACKAGE.read_text(encoding="utf-8"))[
@@ -76,6 +77,40 @@ class LibraryScraperFixV3StructureTests(unittest.TestCase):
             keyword_names = {keyword.arg for keyword in call.keywords}
             self.assertNotIn("tmdbid", keyword_names)
             self.assertNotIn("doubanid", keyword_names)
+
+    def test_v3_page_prioritizes_summary_and_paginates_details(self):
+        source = V3_PLUGIN.read_text(encoding="utf-8")
+        tree = ast.parse(source)
+        plugin_class = next(
+            node
+            for node in tree.body
+            if isinstance(node, ast.ClassDef) and node.name == "LibraryScraperFix"
+        )
+        get_page = next(
+            node
+            for node in plugin_class.body
+            if isinstance(node, ast.FunctionDef) and node.name == "get_page"
+        )
+        calls = [
+            (node.func.attr, node.lineno)
+            for node in ast.walk(get_page)
+            if isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Attribute)
+            and node.func.attr in {"_overview_components", "_issue_items"}
+        ]
+        lines = dict(calls)
+        self.assertLess(lines["_overview_components"], lines["_issue_items"])
+        self.assertIn('"modelValue": [0] if len(panels) == 1 else []', source)
+        self.assertIn("page_size = 20", source)
+
+    def test_v3_exposes_vue_federation_contract(self):
+        source = V3_PLUGIN.read_text(encoding="utf-8")
+        self.assertIn('return "vue", "dist/assets"', source)
+        self.assertIn('"nav_key": "main"', source)
+        self.assertIn('"path": "/history"', source)
+        remote_entry = V3_PLUGIN.parent / "dist" / "assets" / "remoteEntry.js"
+        self.assertTrue(remote_entry.is_file())
+        self.assertIn('"./Config"', remote_entry.read_text(encoding="utf-8"))
 
 
 if __name__ == "__main__":

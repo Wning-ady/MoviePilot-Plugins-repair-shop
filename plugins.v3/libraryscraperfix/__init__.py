@@ -136,7 +136,7 @@ class LibraryScraperFix(_PluginBase):
         "https://raw.githubusercontent.com/Wning-ady/"
         "MoviePilot-Plugins-repair-shop/main/icons/Ombi_A.png"
     )
-    plugin_version = "3.0.1"
+    plugin_version = "3.1.0"
     plugin_author = "jxxghp,Wning-ady"
     author_url = "https://github.com/Wning-ady/MoviePilot-Plugins-repair-shop"
     plugin_config_prefix = "libraryscraperfix_"
@@ -244,8 +244,50 @@ class LibraryScraperFix(_PluginBase):
     def get_command() -> List[Dict[str, Any]]:
         return []
 
+    def get_render_mode(self) -> Tuple[str, str]:
+        """Use the Vue federation page for the V3 detail and sidebar views."""
+        return "vue", "dist/assets"
+
+    def get_sidebar_nav(self) -> List[Dict[str, Any]]:
+        """Expose the scraper result dashboard as a full page in MoviePilot."""
+        return [
+            {
+                "nav_key": "main",
+                "title": "媒体库刮削",
+                "icon": "mdi-library-shelves",
+                "section": "organize",
+                "permission": "manage",
+                "order": 30,
+            }
+        ]
+
     def get_api(self) -> List[Dict[str, Any]]:
-        return []
+        return [
+            {
+                "path": "/history",
+                "endpoint": self.api_history,
+                "methods": ["GET"],
+                "auth": "bear",
+                "summary": "查询媒体库刮削运行记录",
+            }
+        ]
+
+    def api_history(self) -> Dict[str, Any]:
+        """Return JSON data consumed by the Vue federation page."""
+        try:
+            last_run = self.get_data(self._last_run_key) or {}
+            history = self.get_data(self._history_key) or []
+        except Exception as err:
+            logger.error(f"读取媒体库刮削历史 API 失败：{err}")
+            last_run = {}
+            history = []
+        if not isinstance(history, list):
+            history = []
+        return {
+            "last_run": last_run if isinstance(last_run, dict) else {},
+            "history": history[:20],
+            "running": dict(getattr(self, "_running_status", {}) or {}),
+        }
 
     def get_service(self) -> List[Dict[str, Any]]:
         if not self._enabled:
@@ -556,15 +598,16 @@ class LibraryScraperFix(_PluginBase):
                 }
             ]
 
+        # Put the one-screen summary first. Detailed tables remain below so the
+        # result is readable even when a full-library run saved many records.
         page = [self._status_alert(last_run)]
+        page.extend(self._overview_components(last_run))
         issues = self._issue_items(last_run)
         if issues:
             page.append(self._issues_panel(issues))
         nfo_changes_panel = self._nfo_changes_panel(last_run)
         if nfo_changes_panel:
             page.append(nfo_changes_panel)
-        page.extend(self._overview_components(last_run))
-
         details = self._target_detail_items(last_run)
         if details:
             slow_panel = self._slow_targets_panel(details)
@@ -2278,6 +2321,7 @@ class LibraryScraperFix(_PluginBase):
         for item in issues:
             grouped.setdefault(item.get("status", "failed"), []).append(item)
         panels = []
+        page_size = 20
         for status in ("failed", "unrecognized", "partial", "cancelled"):
             items = grouped.get(status) or []
             if not items:
@@ -2314,26 +2358,32 @@ class LibraryScraperFix(_PluginBase):
                         ],
                     }
                 )
-            panels.append(
-                {
-                    "component": "VExpansionPanel",
-                    "content": [
-                        {
-                            "component": "VExpansionPanelTitle",
-                            "text": f"{labels[status]}（{len(items)} 条）",
-                        },
-                        {
-                            "component": "VExpansionPanelText",
-                            "content": [
-                                LibraryScraperFix._table(
-                                    ["具体文件或目标", "所属刮削目标", "原因", "耗时"],
-                                    rows,
-                                )
-                            ],
-                        },
-                    ],
-                }
-            )
+            for start in range(0, len(rows), page_size):
+                page_rows = rows[start : start + page_size]
+                end = start + len(page_rows)
+                page_label = ""
+                if len(rows) > page_size:
+                    page_label = f" · 第 {start // page_size + 1} 页（{start + 1}-{end} / {len(rows)}）"
+                panels.append(
+                    {
+                        "component": "VExpansionPanel",
+                        "content": [
+                            {
+                                "component": "VExpansionPanelTitle",
+                                "text": f"{labels[status]}（{len(items)} 条）{page_label}",
+                            },
+                            {
+                                "component": "VExpansionPanelText",
+                                "content": [
+                                    LibraryScraperFix._table(
+                                        ["具体文件或目标", "所属刮削目标", "原因", "耗时"],
+                                        page_rows,
+                                    )
+                                ],
+                            },
+                        ],
+                    }
+                )
         return {
             "component": "VSheet",
             "props": {"class": "mt-4", "color": "transparent"},
@@ -2348,7 +2398,9 @@ class LibraryScraperFix(_PluginBase):
                     "props": {
                         "variant": "accordion",
                         "multiple": True,
-                        "modelValue": list(range(len(panels))),
+                        # Keep long issue lists closed. A single issue group is
+                        # still opened because it is the most useful result.
+                        "modelValue": [0] if len(panels) == 1 else [],
                     },
                     "content": panels,
                 },
@@ -2568,6 +2620,7 @@ class LibraryScraperFix(_PluginBase):
             grouped.setdefault(item.get("status", ""), []).append(item)
 
         panels = []
+        page_size = 20
         for status in (
             "failed",
             "unrecognized",
@@ -2605,25 +2658,31 @@ class LibraryScraperFix(_PluginBase):
                 }
                 for item in items
             ]
-            panels.append(
-                {
-                    "component": "VExpansionPanel",
-                    "content": [
-                        {
-                            "component": "VExpansionPanelTitle",
-                            "text": f"{status_labels[status]}（{len(items)}）",
-                        },
-                        {
-                            "component": "VExpansionPanelText",
-                            "content": [
-                                LibraryScraperFix._table(
-                                    ["刮削目标", "媒体文件", "耗时", "结果说明"], rows
-                                )
-                            ],
-                        },
-                    ],
-                }
-            )
+            for start in range(0, len(rows), page_size):
+                page_rows = rows[start : start + page_size]
+                end = start + len(page_rows)
+                page_label = ""
+                if len(rows) > page_size:
+                    page_label = f" · 第 {start // page_size + 1} 页（{start + 1}-{end} / {len(rows)}）"
+                panels.append(
+                    {
+                        "component": "VExpansionPanel",
+                        "content": [
+                            {
+                                "component": "VExpansionPanelTitle",
+                                "text": f"{status_labels[status]}（{len(items)}）{page_label}",
+                            },
+                            {
+                                "component": "VExpansionPanelText",
+                                "content": [
+                                    LibraryScraperFix._table(
+                                        ["刮削目标", "媒体文件", "耗时", "结果说明"], page_rows
+                                    )
+                                ],
+                            },
+                        ],
+                    }
+                )
         return {
             "component": "VSheet",
             "props": {"class": "mt-4", "color": "transparent"},

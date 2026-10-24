@@ -3,12 +3,15 @@
     "name": "清理媒体文件（修复版）",
     "description": "安全清理硬链接媒体文件；目标删除不反向清理下载源，源删除须经转移记录与 inode 复核。",
     "labels": "文件整理",
-    "version": "3.0.1",
+    "version": "3.1.0",
     "icon": "https://raw.githubusercontent.com/Wning-ady/MoviePilot-Plugins-repair-shop/main/icons/Ombi_A.png",
     "author": "DzAvril,Wning-ady",
     "level": 1,
+    "release": true,
     "system_version": ">=3.0.0",
     "history": {
+      "v3.1.0": "增加 Vue 联邦详情页和侧栏全页，通过插件 API 提供可搜索、筛选的删除结果。",
+      "v3.0.2": "优化 V3 详情页：运行摘要置顶，问题与删除明细按优先级显示并默认收起，长结果按页展示。",
       "v3.0.1": "删除整理记录后按 ID 回查，仅在记录确实消失时报告成功；新增删除批次结果页，跨定时器轮次汇总任务并展示记录 ID、集数、整理记录与种子联动状态；修正队列清理日志文案",
       "v3.0.0": "适配 MoviePilot V3：复刻 V2 安全删除规则，迁移至 V3 SDK 事件、日志、配置和转移历史入口。"
     }
@@ -17,12 +20,15 @@
     "name": "媒体库刮削(魔改版)",
     "description": "安全增量刮削媒体库，支持 NFO 空白概要与通用标题修复。",
     "labels": "媒体库,刮削",
-    "version": "3.0.1",
+    "version": "3.1.0",
     "icon": "https://raw.githubusercontent.com/Wning-ady/MoviePilot-Plugins-repair-shop/main/icons/Ombi_A.png",
     "author": "jxxghp,Wning-ady",
     "level": 1,
+    "release": true,
     "system_version": ">=3.0.0",
     "history": {
+      "v3.1.0": "增加 Vue 联邦详情页和侧栏全页，通过插件 API 提供可搜索、筛选和分页的运行记录。",
+      "v3.0.2": "优化 V3 详情页：运行摘要置顶，问题与删除明细按优先级显示并默认收起，长结果按页展示。",
       "v3.0.1": "优化大目录扫描：流式消费 os.scandir 条目，降低内存占用并更早产出媒体文件。",
       "v3.0.0": "适配 MoviePilot V3：使用 media_source + media_id 进行显式媒体识别，改用 ScrapingChain 执行元数据刮削，并迁移至 V3 SDK 与规范化整理历史查询。"
     }

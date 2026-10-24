@@ -41,6 +41,7 @@ class RemoveLinkFixV3StructureTests(unittest.TestCase):
         self.assertEqual(metadata["version"], class_values["plugin_version"])
         self.assertEqual(metadata["author"], class_values["plugin_author"])
         self.assertEqual(metadata["level"], class_values["auth_level"])
+        self.assertTrue(metadata["release"])
         self.assertEqual(metadata["system_version"], ">=3.0.0")
 
         v2_metadata = json.loads(V2_PACKAGE.read_text(encoding="utf-8"))["RemoveLinkFix"]
@@ -94,6 +95,22 @@ class RemoveLinkFixV3StructureTests(unittest.TestCase):
         for method_name in method_names:
             with self.subTest(method=method_name):
                 self.assertEqual(v2_methods[method_name], v3_methods[method_name])
+
+    def test_result_page_prioritizes_exceptions_and_stays_collapsed(self):
+        source = V3_PLUGIN.read_text(encoding="utf-8")
+        self.assertIn('"failed": 0', source)
+        self.assertIn('"retained": 1', source)
+        self.assertIn('"missing_hash": 2', source)
+        self.assertIn('"modelValue": [],', source)
+
+    def test_v3_exposes_vue_federation_contract(self):
+        source = V3_PLUGIN.read_text(encoding="utf-8")
+        self.assertIn('return "vue", "dist/assets"', source)
+        self.assertIn('"nav_key": "main"', source)
+        self.assertIn('"path": "/history"', source)
+        remote_entry = V3_PLUGIN.parent / "dist" / "assets" / "remoteEntry.js"
+        self.assertTrue(remote_entry.is_file())
+        self.assertIn('"./Config"', remote_entry.read_text(encoding="utf-8"))
 
 
 if __name__ == "__main__":

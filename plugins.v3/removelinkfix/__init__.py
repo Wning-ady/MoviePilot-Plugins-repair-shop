@@ -303,7 +303,7 @@ class RemoveLinkFix(_PluginBase):
     # 插件图标
     plugin_icon = "https://raw.githubusercontent.com/Wning-ady/MoviePilot-Plugins-repair-shop/main/icons/Ombi_A.png"
     # 插件版本
-    plugin_version = "3.0.1"
+    plugin_version = "3.1.0"
     # 插件作者
     plugin_author = "DzAvril,Wning-ady"
     # 作者主页
@@ -556,8 +556,42 @@ class RemoveLinkFix(_PluginBase):
     def get_command() -> List[Dict[str, Any]]:
         pass
 
+    def get_render_mode(self) -> Tuple[str, str]:
+        """Use the Vue federation page for the V3 cleanup result view."""
+        return "vue", "dist/assets"
+
+    def get_sidebar_nav(self) -> List[Dict[str, Any]]:
+        """Expose the cleanup result dashboard as a full page in MoviePilot."""
+        return [
+            {
+                "nav_key": "main",
+                "title": "清理媒体文件",
+                "icon": "mdi-broom",
+                "section": "organize",
+                "permission": "manage",
+                "order": 31,
+            }
+        ]
+
     def get_api(self) -> List[Dict[str, Any]]:
-        pass
+        return [
+            {
+                "path": "/history",
+                "endpoint": self.api_history,
+                "methods": ["GET"],
+                "auth": "bear",
+                "summary": "查询清理媒体文件结果",
+            }
+        ]
+
+    def api_history(self) -> Dict[str, Any]:
+        """Return JSON data consumed by the Vue federation page."""
+        try:
+            history = self.get_data(self._cleanup_history_key) or []
+        except Exception as err:
+            logger.error(f"读取清理结果 API 失败：{err}")
+            history = []
+        return {"history": history[:20] if isinstance(history, list) else []}
 
     def get_form(self) -> Tuple[List[dict], Dict[str, Any]]:
         return [
@@ -1100,6 +1134,26 @@ class RemoveLinkFix(_PluginBase):
                 "disabled": "未启用",
                 "not_sent": "未发送",
             }
+            status_priority = {
+                "failed": 0,
+                "retained": 1,
+                "missing_hash": 2,
+                "not_sent": 3,
+                "not_processed": 4,
+                "disabled": 5,
+                "deleted": 6,
+                "sent": 6,
+            }
+            items = sorted(
+                items,
+                key=lambda item: (
+                    min(
+                        status_priority.get(item.get("history_status"), 9),
+                        status_priority.get(item.get("torrent_status"), 9),
+                    ),
+                    str(item.get("source") or ""),
+                ),
+            )
             for item in items:
                 rows.append(
                     {
@@ -1138,7 +1192,12 @@ class RemoveLinkFix(_PluginBase):
             page.append(
                 {
                     "component": "VExpansionPanels",
-                    "props": {"variant": "accordion", "modelValue": [0]},
+                    "props": {
+                        "variant": "accordion",
+                        # The batch summary is immediately useful; open the
+                        # long row table only when the operator asks for it.
+                        "modelValue": [],
+                    },
                     "content": [
                         {
                             "component": "VExpansionPanel",

@@ -302,7 +302,7 @@ class RemoveLinkFix(_PluginBase):
     # 插件图标
     plugin_icon = "https://raw.githubusercontent.com/Wning-ady/MoviePilot-Plugins-repair-shop/main/icons/Ombi_A.png"
     # 插件版本
-    plugin_version = "2.19"
+    plugin_version = "2.20"
     # 插件作者
     plugin_author = "DzAvril,Wning-ady"
     # 作者主页
@@ -1099,6 +1099,26 @@ class RemoveLinkFix(_PluginBase):
                 "disabled": "未启用",
                 "not_sent": "未发送",
             }
+            status_priority = {
+                "failed": 0,
+                "retained": 1,
+                "missing_hash": 2,
+                "not_sent": 3,
+                "not_processed": 4,
+                "disabled": 5,
+                "deleted": 6,
+                "sent": 6,
+            }
+            items = sorted(
+                items,
+                key=lambda item: (
+                    min(
+                        status_priority.get(item.get("history_status"), 9),
+                        status_priority.get(item.get("torrent_status"), 9),
+                    ),
+                    str(item.get("source") or ""),
+                ),
+            )
             for item in items:
                 rows.append(
                     {
@@ -1137,7 +1157,12 @@ class RemoveLinkFix(_PluginBase):
             page.append(
                 {
                     "component": "VExpansionPanels",
-                    "props": {"variant": "accordion", "modelValue": [0]},
+                    "props": {
+                        "variant": "accordion",
+                        # The batch summary is immediately useful; open the
+                        # long row table only when the operator asks for it.
+                        "modelValue": [],
+                    },
                     "content": [
                         {
                             "component": "VExpansionPanel",

@@ -17,6 +17,17 @@ jobs:
         with:
           python-version: "3.12"
       - name: Compile plugin
-        run: python -m py_compile plugins.v2/removelinkfix/__init__.py
+        run: python -m compileall -q plugins.v2 plugins.v3
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      - name: Build Vue federation pages
+        run: npm ci --prefix frontend && npm run build --prefix frontend
+      - name: Check federation CSS isolation
+        run: python .github/scripts/check_federation_css.py
+      - name: Check generated diff
+        run: git diff --check
       - name: Run tests
         run: python -m unittest discover -s tests -v

@@ -136,7 +136,7 @@ class LibraryScraperFix(_PluginBase):
         "https://raw.githubusercontent.com/Wning-ady/"
         "MoviePilot-Plugins-repair-shop/main/icons/Ombi_A.png"
     )
-    plugin_version = "3.1.1"
+    plugin_version = "3.1.2"
     plugin_author = "jxxghp,Wning-ady"
     author_url = "https://github.com/Wning-ady/MoviePilot-Plugins-repair-shop"
     plugin_config_prefix = "libraryscraperfix_"
@@ -249,17 +249,8 @@ class LibraryScraperFix(_PluginBase):
         return "vue", "dist/assets"
 
     def get_sidebar_nav(self) -> List[Dict[str, Any]]:
-        """Expose the scraper result dashboard as a full page in MoviePilot."""
-        return [
-            {
-                "nav_key": "main",
-                "title": "媒体库刮削",
-                "icon": "mdi-library-shelves",
-                "section": "organize",
-                "permission": "manage",
-                "order": 30,
-            }
-        ]
+        """Keep the result dashboard available by direct URL only."""
+        return []
 
     def get_api(self) -> List[Dict[str, Any]]:
         return [
@@ -1879,7 +1870,14 @@ class LibraryScraperFix(_PluginBase):
                     collection[index] = item
                     return
 
+        changes = cls._target_change_items(summary, target)
         detail = outcome.detail
+        if not detail and changes:
+            detail = (
+                f"预演将修改 {len(changes)} 项信息"
+                if outcome.status == "dry_run"
+                else f"已修改 {len(changes)} 项信息"
+            )
         if not detail and outcome.status == "unrecognized":
             detail = "未识别到媒体信息"
         elif not detail and outcome.status == "partial":
@@ -1891,6 +1889,8 @@ class LibraryScraperFix(_PluginBase):
                 "path": str(target.path),
                 "files": target.file_count,
                 "detail": detail[:500] if detail else "",
+                "changes": changes,
+                "change_count": len(changes),
                 "duration_seconds": outcome.duration_seconds,
             }
         )
@@ -1920,6 +1920,46 @@ class LibraryScraperFix(_PluginBase):
                     "duration_seconds": outcome.duration_seconds,
                 },
             )
+
+    @classmethod
+    def _target_change_items(
+        cls, summary: Dict[str, Any], target: ScrapeTarget
+    ) -> List[Dict[str, Any]]:
+        """Attach saved NFO field changes to the target that produced them."""
+        target_path = str(target.path).replace("\\", "/").rstrip("/")
+        if not target_path:
+            return []
+        changes: List[Dict[str, Any]] = []
+        for change in summary.get("nfo_changes") or []:
+            if not isinstance(change, dict):
+                continue
+            media_path = str(change.get("media_path") or "").replace("\\", "/").rstrip("/")
+            nfo_path = str(change.get("path") or "").replace("\\", "/").rstrip("/")
+            matched = media_path == target_path or (
+                target.target_type == cls._target_dir
+                and (
+                    media_path.startswith(f"{target_path}/")
+                    or nfo_path.startswith(f"{target_path}/")
+                )
+            )
+            if not matched:
+                continue
+            status = str(change.get("status") or "updated")
+            for field in change.get("fields") or []:
+                if not isinstance(field, dict) or not field.get("field"):
+                    continue
+                changes.append(
+                    {
+                        "path": nfo_path,
+                        "field": str(field.get("field")),
+                        "before": str(field.get("before") or ""),
+                        "after": str(field.get("after") or ""),
+                        "status": status,
+                    }
+                )
+                if len(changes) >= 20:
+                    return changes
+        return changes
 
     def _save_run_summary(self, summary: Dict[str, Any]) -> None:
         try:

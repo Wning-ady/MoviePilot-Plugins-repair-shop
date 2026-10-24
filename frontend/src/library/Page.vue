@@ -44,6 +44,7 @@ const pageSize = 20
 const pageCount = computed(() => Math.max(1, Math.ceil(filteredDetails.value.length / pageSize)))
 const pagedDetails = computed(() => filteredDetails.value.slice((detailPage.value - 1) * pageSize, detailPage.value * pageSize))
 const nfoChanges = computed(() => summary.value.nfo_changes || [])
+const fieldLabels = { title: '标题', plot: '剧情', outline: '简介' }
 
 const statusLabels = {
   success: '成功',
@@ -64,6 +65,32 @@ function duration(value) {
   if (seconds >= 3600) return `${Math.floor(seconds / 3600)} 小时 ${Math.floor(seconds % 3600 / 60)} 分`
   if (seconds >= 60) return `${Math.floor(seconds / 60)} 分 ${Math.round(seconds % 60)} 秒`
   return `${Math.round(seconds * 100) / 100} 秒`
+}
+
+function displayValue(value) {
+  return String(value || '').trim() || '（空）'
+}
+
+function targetChanges(item) {
+  if (Array.isArray(item?.changes) && item.changes.length) return item.changes
+  const targetPath = String(item?.path || '').replaceAll('\\', '/').replace(/\/+$/, '')
+  if (!targetPath) return []
+  return nfoChanges.value.flatMap((change) => {
+    const mediaPath = String(change?.media_path || '').replaceAll('\\', '/').replace(/\/+$/, '')
+    const nfoPath = String(change?.path || '').replaceAll('\\', '/').replace(/\/+$/, '')
+    const matches = mediaPath === targetPath || mediaPath.startsWith(`${targetPath}/`)
+    if (!matches && !nfoPath.startsWith(`${targetPath}/`)) return []
+    return (change?.fields || []).map((field) => ({
+      field: field.field,
+      before: field.before,
+      after: field.after,
+      status: change.status,
+    }))
+  }).slice(0, 20)
+}
+
+function changeStatusLabel(status) {
+  return status === 'dry_run' ? '预演' : '已写入'
 }
 
 function normalizeResponse(result) {
@@ -139,23 +166,24 @@ onMounted(load)
         </v-card-text>
       </v-card>
 
+      <v-card v-if="nfoChanges.length" variant="outlined" class="mt-5">
+        <v-card-title>NFO 实际变更 <v-chip class="ml-2" size="small" color="info">{{ nfoChanges.length }} 个文件</v-chip></v-card-title>
+        <v-card-text><v-table density="comfortable"><thead><tr><th>文件</th><th>字段</th><th>修改前</th><th>修改后</th><th>状态</th></tr></thead><tbody>
+          <template v-for="(change, index) in nfoChanges.slice(0, 100)" :key="`nfo-${index}`"><tr v-for="field in change.fields || []" :key="`${index}-${field.field}`"><td class="path-cell">{{ change.path }}</td><td>{{ fieldLabels[field.field] || field.field }}</td><td class="text-cell">{{ displayValue(field.before) }}</td><td class="text-cell">{{ displayValue(field.after) }}</td><td>{{ changeStatusLabel(change.status) }}</td></tr></template>
+        </tbody></v-table></v-card-text>
+      </v-card>
+
       <v-card variant="outlined" class="mt-5">
         <v-card-title class="d-flex flex-wrap align-center ga-3"><span>目标结果</span><v-chip size="small">{{ filteredDetails.length }} / {{ details.length }}</v-chip><v-spacer /><v-text-field v-model="search" density="compact" hide-details clearable label="搜索路径或说明" prepend-inner-icon="mdi-magnify" style="max-width: 320px" @update:model-value="detailPage = 1" /><v-select :model-value="filter" :items="[{title:'全部',value:'all'},{title:'问题',value:'problem'},{title:'成功',value:'success'},{title:'预演',value:'dry_run'},{title:'延后',value:'deferred'}]" density="compact" hide-details label="状态" style="max-width: 150px" @update:model-value="resetFilter" /></v-card-title>
         <v-card-text>
-          <v-table density="comfortable"><thead><tr><th>状态</th><th>刮削目标</th><th>媒体文件</th><th>耗时</th><th>说明</th></tr></thead><tbody>
-            <tr v-for="(item, index) in pagedDetails" :key="`detail-${index}`"><td><v-chip size="small" :color="statusColor(item.status)">{{ statusLabels[item.status] || item.status }}</v-chip></td><td class="path-cell">{{ item.path }}</td><td>{{ item.files || 0 }}</td><td>{{ duration(item.duration_seconds) }}</td><td>{{ item.detail || '-' }}</td></tr>
+          <v-table density="comfortable"><thead><tr><th>状态</th><th>刮削目标</th><th>媒体文件</th><th>耗时</th><th>实际修改</th></tr></thead><tbody>
+            <tr v-for="(item, index) in pagedDetails" :key="`detail-${index}`"><td><v-chip size="small" :color="statusColor(item.status)">{{ statusLabels[item.status] || item.status }}</v-chip></td><td class="path-cell">{{ item.path }}</td><td>{{ item.files || 0 }}</td><td>{{ duration(item.duration_seconds) }}</td><td class="change-cell"><template v-if="targetChanges(item).length"><div v-for="(change, changeIndex) in targetChanges(item).slice(0, 6)" :key="`${index}-change-${changeIndex}`"><span class="text-caption font-weight-medium">{{ fieldLabels[change.field] || change.field }}：</span>{{ displayValue(change.before) }} → {{ displayValue(change.after) }}<v-chip size="x-small" class="ml-1" :color="change.status === 'dry_run' ? 'info' : 'success'">{{ changeStatusLabel(change.status) }}</v-chip></div><div v-if="targetChanges(item).length > 6" class="text-caption text-medium-emphasis">还有 {{ targetChanges(item).length - 6 }} 项</div></template><span v-else>{{ item.detail || '-' }}</span></td></tr>
             <tr v-if="!pagedDetails.length"><td colspan="5" class="text-center text-medium-emphasis py-6">没有匹配的目标</td></tr>
           </tbody></v-table>
           <div class="d-flex justify-center mt-3"><v-pagination v-model="detailPage" :length="pageCount" density="compact" :total-visible="5" /></div>
         </v-card-text>
       </v-card>
 
-      <v-card v-if="nfoChanges.length" variant="outlined" class="mt-5">
-        <v-card-title>NFO 实际变更 <v-chip class="ml-2" size="small" color="info">{{ nfoChanges.length }} 个文件</v-chip></v-card-title>
-        <v-card-text><v-table density="comfortable"><thead><tr><th>文件</th><th>字段</th><th>修改前</th><th>修改后</th><th>状态</th></tr></thead><tbody>
-          <template v-for="(change, index) in nfoChanges.slice(0, 100)" :key="`nfo-${index}`"><tr v-for="field in change.fields || []" :key="`${index}-${field.field}`"><td class="path-cell">{{ change.path }}</td><td>{{ field.field }}</td><td class="text-cell">{{ field.before || '（空）' }}</td><td class="text-cell">{{ field.after || '（空）' }}</td><td>{{ change.status === 'dry_run' ? '预演' : '已写入' }}</td></tr></template>
-        </tbody></v-table></v-card-text>
-      </v-card>
     </template>
   </div>
 </template>
@@ -163,4 +191,5 @@ onMounted(load)
 <style scoped>
 .path-cell { min-width: 220px; max-width: 460px; white-space: normal; overflow-wrap: anywhere; }
 .text-cell { min-width: 180px; max-width: 360px; white-space: normal; overflow-wrap: anywhere; }
+.change-cell { min-width: 300px; max-width: 620px; white-space: normal; overflow-wrap: anywhere; }
 </style>

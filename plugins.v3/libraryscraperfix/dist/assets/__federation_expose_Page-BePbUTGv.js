@@ -22,11 +22,18 @@ const _hoisted_7 = {
   class: "text-caption text-medium-emphasis mt-2"
 };
 const _hoisted_8 = { class: "path-cell" };
-const _hoisted_9 = { key: 0 };
-const _hoisted_10 = { class: "d-flex justify-center mt-3" };
+const _hoisted_9 = { class: "text-cell" };
+const _hoisted_10 = { class: "text-cell" };
 const _hoisted_11 = { class: "path-cell" };
-const _hoisted_12 = { class: "text-cell" };
-const _hoisted_13 = { class: "text-cell" };
+const _hoisted_12 = { class: "change-cell" };
+const _hoisted_13 = { class: "text-caption font-weight-medium" };
+const _hoisted_14 = {
+  key: 0,
+  class: "text-caption text-medium-emphasis"
+};
+const _hoisted_15 = { key: 1 };
+const _hoisted_16 = { key: 0 };
+const _hoisted_17 = { class: "d-flex justify-center mt-3" };
 
 const {computed,onMounted,ref} = await importShared('vue');
 
@@ -81,6 +88,7 @@ const filteredDetails = computed(() => {
 const pageCount = computed(() => Math.max(1, Math.ceil(filteredDetails.value.length / pageSize)));
 const pagedDetails = computed(() => filteredDetails.value.slice((detailPage.value - 1) * pageSize, detailPage.value * pageSize));
 const nfoChanges = computed(() => summary.value.nfo_changes || []);
+const fieldLabels = { title: '标题', plot: '剧情', outline: '简介' };
 
 const statusLabels = {
   success: '成功',
@@ -101,6 +109,32 @@ function duration(value) {
   if (seconds >= 3600) return `${Math.floor(seconds / 3600)} 小时 ${Math.floor(seconds % 3600 / 60)} 分`
   if (seconds >= 60) return `${Math.floor(seconds / 60)} 分 ${Math.round(seconds % 60)} 秒`
   return `${Math.round(seconds * 100) / 100} 秒`
+}
+
+function displayValue(value) {
+  return String(value || '').trim() || '（空）'
+}
+
+function targetChanges(item) {
+  if (Array.isArray(item?.changes) && item.changes.length) return item.changes
+  const targetPath = String(item?.path || '').replaceAll('\\', '/').replace(/\/+$/, '');
+  if (!targetPath) return []
+  return nfoChanges.value.flatMap((change) => {
+    const mediaPath = String(change?.media_path || '').replaceAll('\\', '/').replace(/\/+$/, '');
+    const nfoPath = String(change?.path || '').replaceAll('\\', '/').replace(/\/+$/, '');
+    const matches = mediaPath === targetPath || mediaPath.startsWith(`${targetPath}/`);
+    if (!matches && !nfoPath.startsWith(`${targetPath}/`)) return []
+    return (change?.fields || []).map((field) => ({
+      field: field.field,
+      before: field.before,
+      after: field.after,
+      status: change.status,
+    }))
+  }).slice(0, 20)
+}
+
+function changeStatusLabel(status) {
+  return status === 'dry_run' ? '预演' : '已写入'
 }
 
 function normalizeResponse(result) {
@@ -448,6 +482,71 @@ return (_ctx, _cache) => {
                 _: 1
               }))
             : _createCommentVNode("", true),
+          (nfoChanges.value.length)
+            ? (_openBlock(), _createBlock(_component_v_card, {
+                key: 1,
+                variant: "outlined",
+                class: "mt-5"
+              }, {
+                default: _withCtx(() => [
+                  _createVNode(_component_v_card_title, null, {
+                    default: _withCtx(() => [
+                      _cache[15] || (_cache[15] = _createTextVNode("NFO 实际变更 ", -1)),
+                      _createVNode(_component_v_chip, {
+                        class: "ml-2",
+                        size: "small",
+                        color: "info"
+                      }, {
+                        default: _withCtx(() => [
+                          _createTextVNode(_toDisplayString(nfoChanges.value.length) + " 个文件", 1)
+                        ]),
+                        _: 1
+                      })
+                    ]),
+                    _: 1
+                  }),
+                  _createVNode(_component_v_card_text, null, {
+                    default: _withCtx(() => [
+                      _createVNode(_component_v_table, { density: "comfortable" }, {
+                        default: _withCtx(() => [
+                          _cache[16] || (_cache[16] = _createElementVNode("thead", null, [
+                            _createElementVNode("tr", null, [
+                              _createElementVNode("th", null, "文件"),
+                              _createElementVNode("th", null, "字段"),
+                              _createElementVNode("th", null, "修改前"),
+                              _createElementVNode("th", null, "修改后"),
+                              _createElementVNode("th", null, "状态")
+                            ])
+                          ], -1)),
+                          _createElementVNode("tbody", null, [
+                            (_openBlock(true), _createElementBlock(_Fragment, null, _renderList(nfoChanges.value.slice(0, 100), (change, index) => {
+                              return (_openBlock(), _createElementBlock(_Fragment, {
+                                key: `nfo-${index}`
+                              }, [
+                                (_openBlock(true), _createElementBlock(_Fragment, null, _renderList(change.fields || [], (field) => {
+                                  return (_openBlock(), _createElementBlock("tr", {
+                                    key: `${index}-${field.field}`
+                                  }, [
+                                    _createElementVNode("td", _hoisted_8, _toDisplayString(change.path), 1),
+                                    _createElementVNode("td", null, _toDisplayString(fieldLabels[field.field] || field.field), 1),
+                                    _createElementVNode("td", _hoisted_9, _toDisplayString(displayValue(field.before)), 1),
+                                    _createElementVNode("td", _hoisted_10, _toDisplayString(displayValue(field.after)), 1),
+                                    _createElementVNode("td", null, _toDisplayString(changeStatusLabel(change.status)), 1)
+                                  ]))
+                                }), 128))
+                              ], 64))
+                            }), 128))
+                          ])
+                        ]),
+                        _: 1
+                      })
+                    ]),
+                    _: 1
+                  })
+                ]),
+                _: 1
+              }))
+            : _createCommentVNode("", true),
           _createVNode(_component_v_card, {
             variant: "outlined",
             class: "mt-5"
@@ -455,7 +554,7 @@ return (_ctx, _cache) => {
             default: _withCtx(() => [
               _createVNode(_component_v_card_title, { class: "d-flex flex-wrap align-center ga-3" }, {
                 default: _withCtx(() => [
-                  _cache[15] || (_cache[15] = _createElementVNode("span", null, "目标结果", -1)),
+                  _cache[17] || (_cache[17] = _createElementVNode("span", null, "目标结果", -1)),
                   _createVNode(_component_v_chip, { size: "small" }, {
                     default: _withCtx(() => [
                       _createTextVNode(_toDisplayString(filteredDetails.value.length) + " / " + _toDisplayString(details.value.length), 1)
@@ -492,13 +591,13 @@ return (_ctx, _cache) => {
                 default: _withCtx(() => [
                   _createVNode(_component_v_table, { density: "comfortable" }, {
                     default: _withCtx(() => [
-                      _cache[17] || (_cache[17] = _createElementVNode("thead", null, [
+                      _cache[19] || (_cache[19] = _createElementVNode("thead", null, [
                         _createElementVNode("tr", null, [
                           _createElementVNode("th", null, "状态"),
                           _createElementVNode("th", null, "刮削目标"),
                           _createElementVNode("th", null, "媒体文件"),
                           _createElementVNode("th", null, "耗时"),
-                          _createElementVNode("th", null, "说明")
+                          _createElementVNode("th", null, "实际修改")
                         ])
                       ], -1)),
                       _createElementVNode("tbody", null, [
@@ -517,14 +616,40 @@ return (_ctx, _cache) => {
                                 _: 2
                               }, 1032, ["color"])
                             ]),
-                            _createElementVNode("td", _hoisted_8, _toDisplayString(item.path), 1),
+                            _createElementVNode("td", _hoisted_11, _toDisplayString(item.path), 1),
                             _createElementVNode("td", null, _toDisplayString(item.files || 0), 1),
                             _createElementVNode("td", null, _toDisplayString(duration(item.duration_seconds)), 1),
-                            _createElementVNode("td", null, _toDisplayString(item.detail || '-'), 1)
+                            _createElementVNode("td", _hoisted_12, [
+                              (targetChanges(item).length)
+                                ? (_openBlock(), _createElementBlock(_Fragment, { key: 0 }, [
+                                    (_openBlock(true), _createElementBlock(_Fragment, null, _renderList(targetChanges(item).slice(0, 6), (change, changeIndex) => {
+                                      return (_openBlock(), _createElementBlock("div", {
+                                        key: `${index}-change-${changeIndex}`
+                                      }, [
+                                        _createElementVNode("span", _hoisted_13, _toDisplayString(fieldLabels[change.field] || change.field) + "：", 1),
+                                        _createTextVNode(_toDisplayString(displayValue(change.before)) + " → " + _toDisplayString(displayValue(change.after)), 1),
+                                        _createVNode(_component_v_chip, {
+                                          size: "x-small",
+                                          class: "ml-1",
+                                          color: change.status === 'dry_run' ? 'info' : 'success'
+                                        }, {
+                                          default: _withCtx(() => [
+                                            _createTextVNode(_toDisplayString(changeStatusLabel(change.status)), 1)
+                                          ]),
+                                          _: 2
+                                        }, 1032, ["color"])
+                                      ]))
+                                    }), 128)),
+                                    (targetChanges(item).length > 6)
+                                      ? (_openBlock(), _createElementBlock("div", _hoisted_14, "还有 " + _toDisplayString(targetChanges(item).length - 6) + " 项", 1))
+                                      : _createCommentVNode("", true)
+                                  ], 64))
+                                : (_openBlock(), _createElementBlock("span", _hoisted_15, _toDisplayString(item.detail || '-'), 1))
+                            ])
                           ]))
                         }), 128)),
                         (!pagedDetails.value.length)
-                          ? (_openBlock(), _createElementBlock("tr", _hoisted_9, [...(_cache[16] || (_cache[16] = [
+                          ? (_openBlock(), _createElementBlock("tr", _hoisted_16, [...(_cache[18] || (_cache[18] = [
                               _createElementVNode("td", {
                                 colspan: "5",
                                 class: "text-center text-medium-emphasis py-6"
@@ -535,7 +660,7 @@ return (_ctx, _cache) => {
                     ]),
                     _: 1
                   }),
-                  _createElementVNode("div", _hoisted_10, [
+                  _createElementVNode("div", _hoisted_17, [
                     _createVNode(_component_v_pagination, {
                       modelValue: detailPage.value,
                       "onUpdate:modelValue": _cache[4] || (_cache[4] = $event => ((detailPage).value = $event)),
@@ -549,72 +674,7 @@ return (_ctx, _cache) => {
               })
             ]),
             _: 1
-          }),
-          (nfoChanges.value.length)
-            ? (_openBlock(), _createBlock(_component_v_card, {
-                key: 1,
-                variant: "outlined",
-                class: "mt-5"
-              }, {
-                default: _withCtx(() => [
-                  _createVNode(_component_v_card_title, null, {
-                    default: _withCtx(() => [
-                      _cache[18] || (_cache[18] = _createTextVNode("NFO 实际变更 ", -1)),
-                      _createVNode(_component_v_chip, {
-                        class: "ml-2",
-                        size: "small",
-                        color: "info"
-                      }, {
-                        default: _withCtx(() => [
-                          _createTextVNode(_toDisplayString(nfoChanges.value.length) + " 个文件", 1)
-                        ]),
-                        _: 1
-                      })
-                    ]),
-                    _: 1
-                  }),
-                  _createVNode(_component_v_card_text, null, {
-                    default: _withCtx(() => [
-                      _createVNode(_component_v_table, { density: "comfortable" }, {
-                        default: _withCtx(() => [
-                          _cache[19] || (_cache[19] = _createElementVNode("thead", null, [
-                            _createElementVNode("tr", null, [
-                              _createElementVNode("th", null, "文件"),
-                              _createElementVNode("th", null, "字段"),
-                              _createElementVNode("th", null, "修改前"),
-                              _createElementVNode("th", null, "修改后"),
-                              _createElementVNode("th", null, "状态")
-                            ])
-                          ], -1)),
-                          _createElementVNode("tbody", null, [
-                            (_openBlock(true), _createElementBlock(_Fragment, null, _renderList(nfoChanges.value.slice(0, 100), (change, index) => {
-                              return (_openBlock(), _createElementBlock(_Fragment, {
-                                key: `nfo-${index}`
-                              }, [
-                                (_openBlock(true), _createElementBlock(_Fragment, null, _renderList(change.fields || [], (field) => {
-                                  return (_openBlock(), _createElementBlock("tr", {
-                                    key: `${index}-${field.field}`
-                                  }, [
-                                    _createElementVNode("td", _hoisted_11, _toDisplayString(change.path), 1),
-                                    _createElementVNode("td", null, _toDisplayString(field.field), 1),
-                                    _createElementVNode("td", _hoisted_12, _toDisplayString(field.before || '（空）'), 1),
-                                    _createElementVNode("td", _hoisted_13, _toDisplayString(field.after || '（空）'), 1),
-                                    _createElementVNode("td", null, _toDisplayString(change.status === 'dry_run' ? '预演' : '已写入'), 1)
-                                  ]))
-                                }), 128))
-                              ], 64))
-                            }), 128))
-                          ])
-                        ]),
-                        _: 1
-                      })
-                    ]),
-                    _: 1
-                  })
-                ]),
-                _: 1
-              }))
-            : _createCommentVNode("", true)
+          })
         ], 64))
       : _createCommentVNode("", true)
   ]))
@@ -622,6 +682,6 @@ return (_ctx, _cache) => {
 }
 
 };
-const Page = /*#__PURE__*/_export_sfc(_sfc_main, [['__scopeId',"data-v-3de1365a"]]);
+const Page = /*#__PURE__*/_export_sfc(_sfc_main, [['__scopeId',"data-v-24147a80"]]);
 
 export { Page as default };

@@ -15,9 +15,10 @@ const _hoisted_1 = { class: "plugin-page pa-4" };
 const _hoisted_2 = { class: "d-flex flex-wrap align-center ga-3 mb-4" };
 const _hoisted_3 = { class: "text-subtitle-1 font-weight-medium" };
 const _hoisted_4 = { class: "text-body-2" };
-const _hoisted_5 = { class: "path-cell" };
-const _hoisted_6 = { class: "text-cell" };
-const _hoisted_7 = { key: 0 };
+const _hoisted_5 = { class: "timestamp-cell" };
+const _hoisted_6 = { class: "path-cell" };
+const _hoisted_7 = { class: "text-cell" };
+const _hoisted_8 = { key: 0 };
 
 const {computed,onMounted,ref} = await importShared('vue');
 
@@ -59,6 +60,7 @@ const filteredItems = computed(() => items.value.filter((item) => {
 const historyLabels = { deleted: '已删除', retained: '仍保留', disabled: '未启用', not_processed: '未执行' };
 const torrentLabels = { sent: '已发送', missing_hash: '缺少 Hash', disabled: '未启用', not_sent: '未发送' };
 const statusColor = (value) => ({ deleted: 'success', sent: 'success', retained: 'warning', missing_hash: 'error', not_sent: 'warning', failed: 'error' }[value] || 'default');
+const itemTimestamp = (item) => item.completed_at || item.timestamp || batch.value.finished_at || batch.value.started_at || '-';
 
 function normalizeResponse(result) { return result?.data?.history ? result.data : result }
 async function load() {
@@ -305,6 +307,7 @@ return (_ctx, _cache) => {
                       default: _withCtx(() => [
                         _cache[13] || (_cache[13] = _createElementVNode("thead", null, [
                           _createElementVNode("tr", null, [
+                            _createElementVNode("th", null, "时间"),
                             _createElementVNode("th", null, "集数"),
                             _createElementVNode("th", null, "记录 ID"),
                             _createElementVNode("th", null, "整理记录"),
@@ -316,6 +319,7 @@ return (_ctx, _cache) => {
                         _createElementVNode("tbody", null, [
                           (_openBlock(true), _createElementBlock(_Fragment, null, _renderList(filteredItems.value, (item, index) => {
                             return (_openBlock(), _createElementBlock("tr", { key: index }, [
+                              _createElementVNode("td", _hoisted_5, _toDisplayString(itemTimestamp(item)), 1),
                               _createElementVNode("td", null, _toDisplayString(item.episode || '-'), 1),
                               _createElementVNode("td", null, _toDisplayString(item.history_id || '-'), 1),
                               _createElementVNode("td", null, [
@@ -340,14 +344,14 @@ return (_ctx, _cache) => {
                                   _: 2
                                 }, 1032, ["color"])
                               ]),
-                              _createElementVNode("td", _hoisted_5, _toDisplayString(item.source || '-'), 1),
-                              _createElementVNode("td", _hoisted_6, _toDisplayString(item.detail || '-'), 1)
+                              _createElementVNode("td", _hoisted_6, _toDisplayString(item.source || '-'), 1),
+                              _createElementVNode("td", _hoisted_7, _toDisplayString(item.detail || '-'), 1)
                             ]))
                           }), 128)),
                           (!filteredItems.value.length)
-                            ? (_openBlock(), _createElementBlock("tr", _hoisted_7, [...(_cache[12] || (_cache[12] = [
+                            ? (_openBlock(), _createElementBlock("tr", _hoisted_8, [...(_cache[12] || (_cache[12] = [
                                 _createElementVNode("td", {
-                                  colspan: "6",
+                                  colspan: "7",
                                   class: "text-center text-medium-emphasis py-6"
                                 }, "没有匹配的记录", -1)
                               ]))]))
@@ -368,6 +372,6 @@ return (_ctx, _cache) => {
 }
 
 };
-const Page = /*#__PURE__*/_export_sfc(_sfc_main, [['__scopeId',"data-v-93077565"]]);
+const Page = /*#__PURE__*/_export_sfc(_sfc_main, [['__scopeId',"data-v-95ff513a"]]);
 
 export { Page as default };

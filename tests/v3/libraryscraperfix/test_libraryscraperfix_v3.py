@@ -106,7 +106,10 @@ class LibraryScraperFixV3StructureTests(unittest.TestCase):
     def test_v3_exposes_vue_federation_contract(self):
         source = V3_PLUGIN.read_text(encoding="utf-8")
         self.assertIn('return "vue", "dist/assets"', source)
-        self.assertIn('"nav_key": "main"', source)
+        self.assertIn('def get_sidebar_nav', source)
+        self.assertIn('return []', source)
+        self.assertIn('"changes": changes', source)
+        self.assertIn('def _target_change_items', source)
         self.assertIn('"path": "/history"', source)
         remote_entry = V3_PLUGIN.parent / "dist" / "assets" / "remoteEntry.js"
         self.assertTrue(remote_entry.is_file())

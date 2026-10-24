@@ -303,7 +303,7 @@ class RemoveLinkFix(_PluginBase):
     # 插件图标
     plugin_icon = "https://raw.githubusercontent.com/Wning-ady/MoviePilot-Plugins-repair-shop/main/icons/Ombi_A.png"
     # 插件版本
-    plugin_version = "3.1.1"
+    plugin_version = "3.1.2"
     # 插件作者
     plugin_author = "DzAvril,Wning-ady"
     # 作者主页
@@ -561,17 +561,8 @@ class RemoveLinkFix(_PluginBase):
         return "vue", "dist/assets"
 
     def get_sidebar_nav(self) -> List[Dict[str, Any]]:
-        """Expose the cleanup result dashboard as a full page in MoviePilot."""
-        return [
-            {
-                "nav_key": "main",
-                "title": "清理媒体文件",
-                "icon": "mdi-broom",
-                "section": "organize",
-                "permission": "manage",
-                "order": 31,
-            }
-        ]
+        """Keep the result dashboard available by direct URL only."""
+        return []
 
     def get_api(self) -> List[Dict[str, Any]]:
         return [
